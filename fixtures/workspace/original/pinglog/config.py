@@ -1,5 +1,5 @@
-import tomlread
-from valimodel import BaseModel, validator
+import tomllib
+from pydantic import BaseModel, validator
 
 
 class Site(BaseModel):
@@ -15,5 +15,6 @@ class Site(BaseModel):
 
 
 def load_settings(path="sites.toml"):
-    data = tomlread.load(path)
+    with open(path, 'rb') as f:
+        data = tomllib.load(f)
     return data
