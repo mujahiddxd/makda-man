@@ -15,6 +15,7 @@ func main() {
 	store := NewStore(cfg.DataDir)
 	pipe := &Pipeline{cfg: cfg, store: store, ai: NewAIClient(cfg.AIServiceURL),
 		sb: &Sandbox{Image: cfg.SandboxImage, Timeout: time.Duration(cfg.SandboxTimeout) * time.Second,
+			PipCache: map[bool]string{true: "", false: cfg.SandboxPipCache}[cfg.SandboxPipCache == "off"], PipIndexURL: cfg.PipIndexURL,
 			OnLine: func(jobID, runID, stream, line string) {
 				store.Emit(jobID, "sandbox_log", map[string]any{"run": runID, "stream": stream, "line": line})
 			}}}

@@ -390,6 +390,8 @@ async function confirmVerification(count) {
   const verified = m.status === "passed" && s.verdict !== "blocked";
   if (verified) return true;
   const why = m.status === "install_failed" ? "the migrated project did not install in the sandbox"
+    : m.status === "network_error" ? "the sandbox could not download packages (network problem), so no tests ran"
+    : m.status === "no_tests" ? "the project has no tests, so nothing was checked by execution"
     : m.status === "tests_failed" ? `tests failed after the migration (${m.passed}/${m.total} passed; ${(s.baseline || {}).passed}/${(s.baseline || {}).total} before)`
       : m.status ? `the sandbox run ended with "${m.status}"` : "it was not run in the sandbox";
   const go = await vscode.window.showWarningMessage(

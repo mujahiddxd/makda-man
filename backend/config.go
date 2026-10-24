@@ -25,6 +25,8 @@ type Config struct {
 	AllowedOrigins     []string
 	SandboxImage       string
 	SandboxTimeout     int
+	SandboxPipCache    string // docker volume for pip's cache ("off" disables)
+	PipIndexURL        string // optional PyPI mirror for sandbox installs
 	DefaultRepoURL     string
 	PythonVersion      string
 	// DemoStageDelay pauses each analysis stage (not the Docker runs) before it works, so a presenter can narrate a
@@ -96,6 +98,7 @@ func loadConfig() Config {
 		JWTSecret:      get("JWT_SECRET", "default_jwt_secret_key_change_in_production"),
 		AIServiceURL:   strings.TrimRight(get("AI_SERVICE_URL", "http://localhost:8001"), "/"),
 		AllowedOrigins: origins, SandboxImage: get("SANDBOX_IMAGE", "python:3.12-slim"),
+		SandboxPipCache: get("SANDBOX_PIP_CACHE", "depexit-pip-cache"), PipIndexURL: get("PIP_INDEX_URL", ""),
 		SandboxTimeout: timeout, DefaultRepoURL: get("DEFAULT_REPO_URL", "https://github.com/rishrek/LinkWatch"),
 		PythonVersion:      get("PYTHON_VERSION", "3.12"),
 		GitHubClientID:     get("GITHUB_CLIENT_ID", ""),

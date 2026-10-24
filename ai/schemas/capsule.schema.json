@@ -1439,6 +1439,8 @@
             "passed",
             "tests_failed",
             "install_failed",
+            "network_error",
+            "no_tests",
             "timeout",
             "error"
           ],

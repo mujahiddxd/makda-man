@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -33,6 +34,11 @@ type RunResult struct {
 type Sandbox struct {
 	Image   string
 	Timeout time.Duration
+	// PipCache is a Docker volume shared by every install container (pip's download/wheel cache), so packages are
+	// downloaded once and reused by the baseline run, the migrated run and later analyses. "" disables it.
+	PipCache string
+	// PipIndexURL, if set, points pip at a PyPI mirror (for networks where pypi.org is slow).
+	PipIndexURL string
 	// OnLine, if set, receives every output line of a sandbox container (live telemetry over SSE).
 	OnLine func(jobID, runID, stream, line string)
 }
@@ -121,13 +127,47 @@ func buildInstallCommand(repoDir string) string {
 	for _, f := range files {
 		reqArgs = append(reqArgs, "-r", shQuote(f))
 	}
+	// generous retries/timeouts: PyPI downloads over a slow or flaky connection must not look like a broken project
+	pip := "/venv/bin/pip install --progress-bar off --disable-pip-version-check --no-input " + pipNetFlags + " "
 	pipCmd := ""
 	if len(reqArgs) > 0 {
-		pipCmd = "/venv/bin/pip install --progress-bar off --disable-pip-version-check --no-input " + strings.Join(reqArgs, " ") + " && "
+		pipCmd = pip + strings.Join(reqArgs, " ") + " && "
 	} else if fileExists(filepath.Join(repoDir, "pyproject.toml")) || fileExists(filepath.Join(repoDir, "setup.py")) {
-		pipCmd = "/venv/bin/pip install --progress-bar off --disable-pip-version-check --no-input . && "
+		pipCmd = pip + ". && "
 	}
-	return "python -m venv /venv && " + pipCmd + "(/venv/bin/python -c 'import pytest' 2>/dev/null || /venv/bin/pip install -q pytest)"
+	return "python -m venv /venv && " + pipCmd + "(/venv/bin/python -c 'import pytest' 2>/dev/null || " + pip + "-q pytest)"
+}
+
+const pipNetFlags = "--retries 10 --timeout 60"
+
+// installAttempts: a failed install whose log shows a network problem is retried (fresh container) this many times.
+const installAttempts = 3
+
+// networkFailure reports the log line that shows the install failed because PyPI could not be reached
+// (timeouts, DNS, resets, TLS), as opposed to a package that really cannot be installed.
+var networkFailureRe = regexp.MustCompile(`(?m)^.*(ReadTimeoutError|ConnectTimeoutError|NewConnectionError|` +
+	`Temporary failure in name resolution|Name or service not known|Connection reset by peer|` +
+	`Connection aborted|RemoteDisconnected|SSLError|ProxyError|IncompleteRead|` +
+	`Max retries exceeded with url|Read timed out|connection broken by).*$`)
+
+func networkFailure(log string) string {
+	m := networkFailureRe.FindAllString(log, -1)
+	if len(m) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(m[len(m)-1])
+}
+
+// installExtras: docker flags for the install container only (tests run offline and need neither).
+func (sb *Sandbox) installExtras() []string {
+	var out []string
+	if sb.PipCache != "" {
+		out = append(out, "-v", sb.PipCache+":/root/.cache/pip")
+	}
+	if sb.PipIndexURL != "" {
+		out = append(out, "-e", "PIP_INDEX_URL="+sb.PipIndexURL)
+	}
+	return out
 }
 
 // dockerRun runs one container; on timeout it kills the container by name.
@@ -191,11 +231,36 @@ func (sb *Sandbox) Run(ctx context.Context, jobID, runID, kind, repoDir, runDir 
 	res.InstallCommand = []string{"sh", "-c", install}
 	name := fmt.Sprintf("dx-%s-%s-install", jobID, runID)
 	args := append([]string{"run", "--rm", "--name", name}, common...)
+	args = append(args, sb.installExtras()...)
 	args = append(args, sb.Image, "sh", "-c", install)
 	if e := emitFor("install"); e != nil {
 		e("$ " + install)
 	}
-	code, err := sb.dockerRun(ctx, name, args, filepath.Join(runDir, "install.log"), emitFor("install"))
+	logPath := filepath.Join(runDir, "install.log")
+	code, err := sb.dockerRun(ctx, name, args, logPath, emitFor("install"))
+	var netLine string
+	for attempt := 2; err == nil && code != 0 && attempt <= installAttempts; attempt++ {
+		prev, _ := os.ReadFile(logPath)
+		if netLine = networkFailure(string(prev)); netLine == "" {
+			break // a real install failure: retrying cannot help
+		}
+		_ = os.WriteFile(filepath.Join(runDir, fmt.Sprintf("install.attempt%d.log", attempt-1)), prev, 0o644)
+		if e := emitFor("install"); e != nil {
+			e(fmt.Sprintf("[depexit] network problem reaching PyPI (%s); retrying install, attempt %d of %d", trimLine(netLine, 160), attempt, installAttempts))
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Duration(attempt*5) * time.Second):
+		}
+		_ = exec.Command("docker", "volume", "rm", "-f", volume).Run() // fresh venv
+		code, err = sb.dockerRun(ctx, name, args, logPath, emitFor("install"))
+		netLine = ""
+	}
+	if err == nil && code != 0 && netLine == "" {
+		if b, rerr := os.ReadFile(logPath); rerr == nil {
+			netLine = networkFailure(string(b))
+		}
+	}
 	installCode := code
 	res.InstallExitCode = &installCode
 	if err == context.DeadlineExceeded {
@@ -207,6 +272,13 @@ func (sb *Sandbox) Run(ctx context.Context, jobID, runID, kind, repoDir, runDir 
 		return finish()
 	}
 	if code != 0 {
+		if netLine != "" {
+			// the environment failed, not the project: never reported as an install failure
+			res.Status = "network_error"
+			res.Error = fmt.Sprintf("could not download packages from PyPI after %d attempts: %s", installAttempts, trimLine(netLine, 200))
+			_ = os.WriteFile(filepath.Join(runDir, "test.log"), []byte("[depexit] tests not run: packages could not be downloaded (network)\n"), 0o644)
+			return finish()
+		}
 		res.Status = "install_failed"
 		_ = os.WriteFile(filepath.Join(runDir, "test.log"), []byte("[depexit] tests not run: dependency installation failed\n"), 0o644)
 		return finish()
@@ -238,7 +310,8 @@ func (sb *Sandbox) Run(ctx context.Context, jobID, runID, kind, repoDir, runDir 
 		// internal error / conftest import failure: the code under test is broken, which is a test result
 		res.Status, res.Error = "tests_failed", "test session failed to start (see test log)"
 	case code == 5:
-		res.Status, res.Error = "error", "no tests were collected"
+		// pytest found nothing to run: the project has no test suite (a fact, not a failure)
+		res.Status, res.Error = "no_tests", "no tests were collected (the project has no pytest tests)"
 	default:
 		res.Status, res.Error = "error", fmt.Sprintf("pytest exited with code %d", code)
 	}
@@ -290,4 +363,12 @@ func runCmd(ctx context.Context, dir string, name string, args ...string) (strin
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	err := cmd.Run()
 	return strings.TrimSpace(buf.String()), err
+}
+
+func trimLine(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }

@@ -85,11 +85,15 @@ func assessPRRisk(in prRiskInput) prRisk {
 	switch in.MigratedStatus {
 	case "install_failed", "error", "timeout":
 		add("high", "The migrated project did not install or run in the sandbox (%s), so nothing was verified", in.MigratedStatus)
+	case "network_error":
+		add("caution", "The sandbox could not download packages from PyPI (network), so the change is not verified by tests")
+	case "no_tests":
+		add("caution", "The project has no tests, so the change is not verified by execution")
 	}
 	if in.Verdict == "blocked" && len(in.Regressed) == 0 && in.MigratedStatus == "passed" {
 		add("high", "The analysis verdict is blocked")
 	}
-	if in.MigratedTotal == 0 && in.MigratedStatus != "install_failed" && in.MigratedStatus != "error" && in.MigratedStatus != "timeout" {
+	if in.MigratedTotal == 0 && in.MigratedStatus == "passed" {
 		add("caution", "No tests ran, so the change is not verified by execution")
 	}
 

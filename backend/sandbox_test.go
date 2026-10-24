@@ -36,7 +36,7 @@ func TestBuildInstallCommandWithPyprojectOnly(t *testing.T) {
 
 	// Must install with . instead of empty requirement list
 	// (no -q: pip output is streamed live to the UI terminal)
-	if !strings.Contains(cmd, "pip install --progress-bar off --disable-pip-version-check --no-input .") {
+	if !strings.Contains(cmd, "pip install --progress-bar off --disable-pip-version-check --no-input "+pipNetFlags+" .") {
 		t.Fatalf("expected pip install . for pyproject-only repo, got: %s", cmd)
 	}
 	if strings.Contains(cmd, "--no-input  &&") {

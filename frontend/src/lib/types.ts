@@ -253,7 +253,7 @@ export interface Run {
   dependency?: string;
   image: string;
   command: string[];
-  status: "passed" | "tests_failed" | "install_failed" | "timeout" | "error";
+  status: "passed" | "tests_failed" | "install_failed" | "network_error" | "no_tests" | "timeout" | "error";
   install_exit_code?: number;
   test_exit_code?: number;
   duration_s: number;

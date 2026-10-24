@@ -190,6 +190,8 @@ def run(job_dir: Path, target: dict, stage_errors: dict, base_url: str) -> dict:
                   "still_failing": sum(g["change"] == "still_failing" for g in gaps)}
     mig = tot("migrated")
     crit_regress = any(g["change"] in ("regressed", "install_regressed") and g.get("severity") == "critical" for g in gaps)
+    # Blocked = the migration is shown to break something. A network failure or a project without tests is "not
+    # verified", never "blocked": that says nothing about the migrated code.
     if mig["status"] in ("install_failed", "error", "timeout") or crit_regress:
         verdict = "blocked"
     elif mig["status"] == "passed" and gap_counts["regressed"] == 0:
@@ -206,6 +208,16 @@ def run(job_dir: Path, target: dict, stage_errors: dict, base_url: str) -> dict:
     headline = cmp_.get("headline") or (
         f"{at_risk} of {len(out_deps)} dependencies are at risk; tests passing {base['passed']}/{base['total']} "
         f"before and {mig['passed']}/{mig['total']} after migration.")
+    unverified = []
+    if "network_error" in (base["status"], mig["status"]):
+        which = " and ".join(n for n, r in (("baseline", base), ("migrated", mig)) if r["status"] == "network_error")
+        unverified.append(f"the {which} sandbox run could not download packages from PyPI (network problem; retried 3 times)")
+    if "no_tests" in (base["status"], mig["status"]):
+        unverified.append("the project has no pytest tests, so behaviour was not checked by execution")
+    if unverified and not scan_only:
+        headline = (f"{at_risk} of {len(out_deps)} dependencies are at risk. Not verified by tests: "
+                    + "; ".join(unverified) + ".")
+        limitations += [f"Not verified: {u}." for u in unverified]
     if scan_only:
         headline = (f"Scan-only ({ecosystem}): {at_risk} of {len(out_deps)} dependencies are at risk. Replacements are "
                     "proposed by AI but not migrated or verified in a sandbox.")

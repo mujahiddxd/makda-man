@@ -191,7 +191,7 @@ func (p *Pipeline) Run(id string) {
 				p.logf(id, "sandbox_baseline", "info", "Installing original dependencies in %s", p.sb.Image)
 				r := p.sb.Run(ctx, id, "baseline", "baseline", work, runDir)
 				p.logf(id, "sandbox_baseline", "info", "baseline: %s (install exit %s, pytest exit %s)", r.Status, codeStr(r.InstallExitCode), codeStr(r.TestExitCode))
-				if r.Status == "error" || r.Status == "timeout" {
+				if r.Status == "error" || r.Status == "timeout" || r.Status == "network_error" {
 					return nil, fmt.Errorf("baseline run %s: %s", r.Status, r.Error)
 				}
 				return map[string]any{"status": r.Status, "duration_s": r.DurationS}, nil
@@ -324,7 +324,7 @@ func (p *Pipeline) afterAnalysis(ctx context.Context, id, jobDir string, job *Jo
 			p.logf(id, "sandbox_migrated", "info", "Installing migrated dependencies in %s", p.sb.Image)
 			r := p.sb.Run(ctx, id, "migrated", "migrated", migratedRepo, runDir)
 			p.logf(id, "sandbox_migrated", "info", "migrated: %s (install exit %s, pytest exit %s)", r.Status, codeStr(r.InstallExitCode), codeStr(r.TestExitCode))
-			if r.Status == "error" || r.Status == "timeout" {
+			if r.Status == "error" || r.Status == "timeout" || r.Status == "network_error" {
 				return nil, fmt.Errorf("migrated run %s: %s", r.Status, r.Error)
 			}
 			return map[string]any{"status": r.Status, "duration_s": r.DurationS}, nil

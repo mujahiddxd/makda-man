@@ -319,7 +319,7 @@ class Run(BaseModel):
     dependency: str | None = None
     image: str
     command: list[str]
-    status: Literal["passed", "tests_failed", "install_failed", "timeout", "error"]
+    status: Literal["passed", "tests_failed", "install_failed", "network_error", "no_tests", "timeout", "error"]
     install_exit_code: int | None = None
     test_exit_code: int | None = None
     duration_s: float

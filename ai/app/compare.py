@@ -103,7 +103,7 @@ def load_run(job_dir: Path, run_id: str, repo_for_collection: Path | None = None
 
 def _outcomes(run: dict, all_ids: set[str]) -> dict[str, tuple[str, str]]:
     out = {t["id"]: (t["outcome"], t.get("message", "")) for t in run["tests"]}
-    if run["status"] in ("install_failed", "timeout", "error") and not run["tests"]:
+    if run["status"] in ("install_failed", "timeout", "error", "network_error", "no_tests") and not run["tests"]:
         return {i: ("install_failed" if run["status"] == "install_failed" else "not_run", run["status"]) for i in all_ids}
     for tid in all_ids:
         if tid in out:
@@ -216,12 +216,14 @@ async def run(job_dir: Path, run_ids: list[str], py: str, log: gemma.CallLog) ->
                                   "url": "/runs/baseline/log?stream=install"}],
                     "provenance": "evidence"})
 
+    # install gaps compare two real install outcomes only; a network failure or "no tests" says nothing about the code
+    installed = ("passed", "tests_failed", "no_tests")
     if base:
         for other in (r for r in runs if r["id"] != "baseline"):
-            if base["status"] == "install_failed" and other["status"] != "install_failed":
+            if base["status"] == "install_failed" and other["status"] in installed:
                 gaps.append({"test_id": None, "baseline": "install_failed", "migrated": other["status"],
                              "change": "install_fixed", "dependencies": sorted(sandbox_ind), "run_id": other["id"]})
-            elif other["status"] == "install_failed" and base["status"] != "install_failed":
+            elif other["status"] == "install_failed" and base["status"] in installed:
                 gaps.append({"test_id": None, "baseline": base["status"], "migrated": "install_failed",
                              "change": "install_regressed", "dependencies": [], "run_id": other["id"]})
             ids = {t["id"] for t in base["tests"]} | {t["id"] for t in other["tests"]}
@@ -229,6 +231,8 @@ async def run(job_dir: Path, run_ids: list[str], py: str, log: gemma.CallLog) ->
             for tid in sorted(ids):
                 (b, bmsg), (m, mmsg) = bo[tid], mo[tid]
                 if b == m == PASS or (b == "skipped" and m == "skipped"):
+                    continue
+                if "not_run" in (b, m):  # one side never ran tests (network, timeout, no tests): nothing to compare
                     continue
                 if b != PASS and m == PASS:
                     change = "fixed"
