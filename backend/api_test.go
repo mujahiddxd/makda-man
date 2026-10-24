@@ -171,4 +171,8 @@ func TestCORSHeaders(t *testing.T) {
 	if rec.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
 		t.Fatalf("expected CORS allow origin header, got %s", rec.Header().Get("Access-Control-Allow-Origin"))
 	}
+	// The frontend sends the session JWT as a Bearer token (GET /api/auth/me).
+	if !strings.Contains(rec.Header().Get("Access-Control-Allow-Headers"), "Authorization") {
+		t.Fatalf("expected Authorization in allowed headers, got %s", rec.Header().Get("Access-Control-Allow-Headers"))
+	}
 }

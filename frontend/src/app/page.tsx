@@ -89,7 +89,16 @@ export default function HomePage() {
           
           {user ? (
             <div className="flex items-center gap-2">
-              <span className="text-xs font-mono font-medium bg-white px-2.5 py-1 rounded-full border border-ink/20 text-ink">
+              <span className="flex items-center gap-1.5 text-xs font-mono font-medium bg-white pl-1 pr-2.5 py-1 rounded-full border border-ink/20 text-ink">
+                {user.github_login && (
+                  // GitHub serves each account's avatar at github.com/<login>.png
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={`https://github.com/${encodeURIComponent(user.github_login)}.png?size=64`}
+                    alt=""
+                    className="w-5 h-5 rounded-full border border-ink/20"
+                  />
+                )}
                 {user.github_login ? `@${user.github_login}` : user.email}
               </span>
               <button

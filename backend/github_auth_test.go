@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// fakeGitHub serves the three GitHub endpoints the login flow uses.
-func fakeGitHub(t *testing.T, wantCode string) {
+// fakeGitHubOAuth serves the three GitHub endpoints the login flow uses.
+func fakeGitHubOAuth(t *testing.T, wantCode string) {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +76,7 @@ func callback(api *API, state, code string, cookies []*http.Cookie) *httptest.Re
 }
 
 func TestGitHubLoginWebFlowAndMe(t *testing.T) {
-	fakeGitHub(t, "good-code")
+	fakeGitHubOAuth(t, "good-code")
 	api := ghTestAPI(t)
 	state, cookies := startLogin(t, api, "web")
 
@@ -110,7 +110,7 @@ func TestGitHubLoginWebFlowAndMe(t *testing.T) {
 }
 
 func TestGitHubLoginVSCodeReturnsURIPage(t *testing.T) {
-	fakeGitHub(t, "c")
+	fakeGitHubOAuth(t, "c")
 	api := ghTestAPI(t)
 	state, cookies := startLogin(t, api, "vscode")
 	rec := callback(api, state, "c", cookies)
@@ -122,7 +122,7 @@ func TestGitHubLoginVSCodeReturnsURIPage(t *testing.T) {
 }
 
 func TestGitHubLoginRejections(t *testing.T) {
-	fakeGitHub(t, "good")
+	fakeGitHubOAuth(t, "good")
 	api := ghTestAPI(t)
 	state, cookies := startLogin(t, api, "web")
 
