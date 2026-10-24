@@ -30,7 +30,7 @@ Codes: `bad_request` (400), `not_found` (404), `conflict` (409, e.g. capsule not
 | GET | `/api/analyses/{id}/files` | `{files: {path, status: unchanged\|modified\|added\|removed, size_original, size_migrated, viewable}[], changed, migrated_available}`: original clone vs migrated workspace (code viewer) |
 | GET | `/api/analyses/{id}/original/{path}` | one file from the original clone (`text/plain`, ≤1 MiB; 404 if absent) |
 | GET | `/api/analyses/{id}/migrated/{path}` | one file from the migrated workspace (`text/plain`; used by the VS Code quick fix) |
-| POST | `/api/analyses/{id}/pull-request` | deliver the tested migration as a GitHub PR. Body `{token?, dry_run?, draft?}`. `dry_run: true` → `{dry_run, plan: {owner, repo, base_commit, branch, title, body, commits: {message, files}[], files_changed}}` without contacting GitHub. Otherwise → 201 `{url, number, branch, head, forked, commits, created_at}`; 200 with the same object if a PR was already opened. Token from the body (or `GITHUB_TOKEN`), used once, never stored or returned. |
+| POST | `/api/analyses/{id}/pull-request` | deliver the tested migration as a GitHub PR. Body `{token?, dry_run?, draft?, confirm?, split?}`. `dry_run: true` → `{dry_run, plan: {owner, repo, base_commit, branch, title, body, commits: {message, files}[], files_changed, risk}}` without contacting GitHub. `risk` = `{level: low|caution|high, reasons: {level, text}[], files, lines, force_draft, require_confirm, confirm_phrase?}`; when `level` is `high` the PR is always a draft and the request must send `confirm: "I understand"` (else 409 `confirmation_required`, GitHub is not contacted). The description starts with the risk block. The dry run also returns `split: {available, reason?, note, prs: plan[], groups}`: PR 1 = quick wins (manifest-only), then one PR per code rewrite in priority order, stacked (each based on the previous branch; manifests per step from `data/<id>/split/<k>/`, the last step equals the tested workspace). `split: true` opens the whole stack (needs push access, else 409 `split_needs_push_access`; 409 `split_unavailable` with the reason) and returns the first PR with `stack: PRResult[]`. Otherwise → 201 `{url, number, branch, head, forked, commits, created_at}`; 200 with the same object if a PR was already opened. Token from the body (or `GITHUB_TOKEN`), used once, never stored or returned. |
 | GET | `/api/analyses/{id}/pull-request` | the PR already opened for this analysis (404 if none) |
 | GET | `/api/analyses/{id}/bundle.zip` | *(stretch)* whole capsule folder |
 
@@ -161,6 +161,7 @@ interface Dependency {
   usage: { locations: UsageLocation[]; files: string[]; summary: string;
            summary_provenance: "ai" | "derived"; };
   blast_radius?: BlastRadius | null;   // null when the dependency is not imported anywhere
+  risk_change?: RiskChange | null;     // risk today vs after the proposed change (same scoring engine), derived
   replacement?: { strategy: Strategy; package?: string; version_spec?: string;
                   rationale: string; confidence: number /*0-1*/;
                   alternatives: { package: string; reason_rejected: string }[];
@@ -206,6 +207,27 @@ interface CapsuleSummary {
   gaps: { fixed: number; regressed: number; still_failing: number };
   verdict: "safe_to_migrate" | "migrate_with_care" | "blocked";   // derived
   headline: string;                   // one sentence, ai or derived
+  risk_reduction?: RiskReduction | null;  // project-wide before -> after of all proposals, derived
+}
+
+// Proposals are never rejected for not lowering risk; the change is shown as reduced / unchanged / increased.
+interface RiskChange {
+  before: { score: number; level: RiskLevel };
+  after: { score: number; level: RiskLevel; package?: string | null; version?: string | null };
+  reduction: number; reduction_pct: number;          // before - after (negative = riskier)
+  outcome: "eliminated" | "reduced" | "unchanged" | "increased";
+  resolved: RiskItem[]; remaining: RiskItem[]; introduced: RiskItem[];   // RiskItem = { code, detail, points }
+  after_indicators: Indicator[];
+  why_chosen: string[];               // registry/OSV facts about the chosen package + alternatives' scores
+  alternatives: { package: string; version?: string | null; score?: number | null; level?: RiskLevel | null }[];
+  explanation: string; provenance: "derived";
+}
+
+interface RiskReduction {
+  total_before: number; total_after: number; reduced_by: number; reduced_pct: number;
+  at_risk_before: number; at_risk_after: number; max_before: number; max_after: number;
+  by_level_after: Record<RiskLevel, number>;
+  eliminated: number; reduced: number; unchanged: number; increased: number;
 }
 
 interface Capsule {

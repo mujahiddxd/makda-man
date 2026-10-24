@@ -176,6 +176,18 @@ export interface PullRequestPlan {
   body: string;
   commits: { message: string; files: string[] }[];
   files_changed: string[];
+  risk?: PullRequestRisk;
+}
+
+/** Review-risk gate computed by the server. "high" is always a draft and needs confirm_phrase. */
+export interface PullRequestRisk {
+  level: "low" | "caution" | "high";
+  reasons: { level: "caution" | "high"; text: string }[];
+  files: number;
+  lines: number;
+  force_draft: boolean;
+  require_confirm: boolean;
+  confirm_phrase?: string;
 }
 
 export interface PullRequestResult {
@@ -185,7 +197,20 @@ export interface PullRequestResult {
   head: string;
   forked: boolean;
   commits: number;
+  draft?: boolean;
   created_at: string;
+  title?: string;
+  stack?: PullRequestResult[]; // split mode: every PR of the stack in merge order
+}
+
+/** Stack of small PRs: quick wins first, then one PR per code rewrite (each based on the previous one). */
+export interface PullRequestSplit {
+  available: boolean;
+  reason?: string;
+  note?: string;
+  prs: PullRequestPlan[] | null;
+  groups?: { index: number; kind: "quick_wins" | "rewrite"; dependencies: string[]; insertions: number; deletions: number;
+             label: string; risk_reduction: number; title: string }[];
 }
 
 /** The PR already opened for this analysis, or null. */
@@ -197,26 +222,32 @@ export async function getPullRequest(id: string): Promise<PullRequestResult | nu
 }
 
 /** Dry run: what the PR would contain, without contacting GitHub. */
-export async function previewPullRequest(id: string): Promise<PullRequestPlan> {
+export async function previewPullRequest(id: string): Promise<{ plan: PullRequestPlan; split?: PullRequestSplit }> {
   if (IS_MOCK) {
     const res = await fetch("/fixtures/pull_request_plan.json");
-    return (await handleResponse<{ plan: PullRequestPlan }>(res)).plan;
+    return handleResponse<{ plan: PullRequestPlan; split?: PullRequestSplit }>(res);
   }
   const res = await fetch(`${API}/api/analyses/${encodeURIComponent(id)}/pull-request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ dry_run: true }),
   });
-  return (await handleResponse<{ plan: PullRequestPlan }>(res)).plan;
+  return handleResponse<{ plan: PullRequestPlan; split?: PullRequestSplit }>(res);
 }
 
 /** Opens the PR. The token is sent once in the request body; it is never stored by the UI or the server. */
-export async function createPullRequest(id: string, token: string, draft: boolean): Promise<PullRequestResult> {
+export async function createPullRequest(
+  id: string,
+  token: string,
+  draft: boolean,
+  confirm?: string,
+  split?: boolean,
+): Promise<PullRequestResult> {
   if (IS_MOCK) throw new ApiRequestError("Pull requests are disabled in mock mode", "mock", 400);
   const res = await fetch(`${API}/api/analyses/${encodeURIComponent(id)}/pull-request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token, draft }),
+    body: JSON.stringify({ token, draft, confirm, split }),
   });
   return handleResponse<PullRequestResult>(res);
 }

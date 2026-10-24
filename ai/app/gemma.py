@@ -219,10 +219,8 @@ async def generate(prompt: str, temperature: float = 0.2, max_tokens: int = 8192
                     stats["last_err"] = KEYS_EXHAUSTED
                     log.error(KEYS_EXHAUSTED + " %s", POOL.status())
                     raise GemmaUnavailable(stats["last_err"])
-                if POOL.next_key(set()) is None:  # every key is briefly rate-limited: wait, the deadline still applies
-                    await asyncio.sleep(min(wait, 65) + 0.5)
-                    tried_keys.clear()
-                    continue
+                if POOL.next_key(set()) is None:  # every key is rate-limited: fail fast so the next tier answers now
+                    stats["last_err"] = f"{model}: all keys rate-limited (next free in {int(wait)}s)"
                 raise GemmaUnavailable(stats["last_err"])
             tried_keys.add(key)
             stats["attempts"] += 1
@@ -268,7 +266,7 @@ async def generate(prompt: str, temperature: float = 0.2, max_tokens: int = 8192
             ms = model_list or models()
             tasks = [asyncio.create_task(try_model(ms[0]))]
             try:
-                hedge_after = float(config.get("GEMMA_HEDGE_AFTER_S", "30"))
+                hedge_after = float(config.get("GEMMA_HEDGE_AFTER_S", "15"))
                 done, _ = await asyncio.wait(tasks, timeout=hedge_after)
                 if done and not tasks[0].exception():
                     text, model = tasks[0].result()
@@ -391,9 +389,11 @@ async def complete_json(log_: CallLog, purpose: str, prompt: str, schema: type[T
     """Ask for JSON matching `schema` within a HARD `deadline_s`.
 
     Provider chain (each tier gets a time budget; a slow call is abandoned, never awaited):
-      1. Gemma 4 (GEMMA_MODELS)                   primary, GEMMA_BUDGET_SHARE (default 60%) of the deadline
-      2. Gemini fallback models (FALLBACK_MODELS)  only if Gemma failed or ran out of time
-      3. xAI Grok (XAI_API_KEYS)                   last resort
+      1. Gemma 4 (GEMMA_MODELS)                   primary, GEMMA_BUDGET_SHARE (default 30%) of the deadline
+      2. Gemini fallback models (FALLBACK_MODELS)  only if Gemma failed or ran out of time, GEMINI_BUDGET_SHARE
+                                                   (default 50%) of what is left
+      3. Groq (GROQ_API_KEYS)                      fast OpenAI-compatible fallback
+      4. xAI Grok (XAI_API_KEYS)                   last resort
     Every call is logged with the model that actually answered, so the capsule can disclose fallback use.
     Returns None if every tier fails; callers then use deterministic fallbacks (provenance "derived").
 
@@ -434,12 +434,13 @@ async def _within(coro, timeout: float):
 async def _complete_chain(log_: CallLog, purpose: str, prompt: str, schema: type[T], max_tokens: int,
                           deadline_s: float) -> tuple[T | None, str, str]:
     t_end = time.time() + deadline_s
-    gemma_share = float(config.get("GEMMA_BUDGET_SHARE", "0.6"))
+    gemma_share = float(config.get("GEMMA_BUDGET_SHARE", "0.3"))
     tiers = []
     if KeyPool.configured():
         tiers.append(("gemma", lambda q: generate(q, max_tokens=max_tokens), gemma_share))
         if fallback_models():
-            tiers.append(("gemini", lambda q: generate(q, max_tokens=max_tokens, model_list=fallback_models()), 0.7))
+            tiers.append(("gemini", lambda q: generate(q, max_tokens=max_tokens, model_list=fallback_models()),
+                          float(config.get("GEMINI_BUDGET_SHARE", "0.5"))))
     for name in ("groq", "xai"):
         if _provider_keys(name):
             tiers.append((name, (lambda n: lambda q: _compat_or_raise(n, q, max_tokens))(name), 0.85))

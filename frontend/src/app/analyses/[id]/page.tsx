@@ -18,6 +18,9 @@ import { CodeDiffViewer } from "@/components/CodeDiffViewer";
 import { RepoCodeBrowser } from "@/components/RepoCodeBrowser";
 import { SandboxTerminals } from "@/components/SandboxTerminals";
 import { BlastMap } from "@/components/BlastMap";
+import { RiskReductionPanel } from "@/components/RiskReduction";
+import { PriorityMatrix } from "@/components/PriorityMatrix";
+import { TransitivePanel } from "@/components/TransitivePanel";
 import { PipelineFlow } from "@/components/PipelineFlow";
 import { PullRequestDialog } from "@/components/PullRequestDialog";
 import { GitPullRequest } from "lucide-react";
@@ -296,6 +299,24 @@ export default function AnalysisPage() {
           )}
 
           <KpiTiles summary={capsule.summary} scanOnly={scanOnly} />
+
+          {capsule.summary.priority && (
+            <PriorityMatrix
+              summary={capsule.summary.priority}
+              dependencies={capsule.dependencies}
+              onSelectDependency={(dep) => setSelectedDependency(dep)}
+            />
+          )}
+
+          {capsule.summary.risk_reduction && (
+            <RiskReductionPanel
+              summary={capsule.summary.risk_reduction}
+              dependencies={capsule.dependencies}
+              onSelectDependency={(dep) => setSelectedDependency(dep)}
+            />
+          )}
+
+          {capsule.transitive && <TransitivePanel transitive={capsule.transitive} />}
 
           {/* Repo-wide blast map (graph) */}
           <BlastMap dependencies={capsule.dependencies} />

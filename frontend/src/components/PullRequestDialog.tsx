@@ -1,13 +1,29 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { Check, Copy, ExternalLink, GitBranch, GitPullRequest, KeyRound, Loader2, Terminal, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  ExternalLink,
+  GitBranch,
+  GitPullRequest,
+  KeyRound,
+  Layers,
+  Loader2,
+  ShieldAlert,
+  ShieldCheck,
+  Terminal,
+  X,
+} from "lucide-react";
 import {
   createPullRequest,
   getPullRequest,
   previewPullRequest,
   type PullRequestPlan,
   type PullRequestResult,
+  type PullRequestRisk,
+  type PullRequestSplit,
 } from "@/lib/api";
 import { apiUrl } from "@/lib/url";
 
@@ -35,6 +51,109 @@ function CopyBlock({ text }: { text: string }) {
   );
 }
 
+const RISK_STYLE = {
+  low: { box: "bg-[#EAF6E2] border-[#17151F]", title: "Review risk: low", Icon: ShieldCheck, icon: "text-[#3D7A25]" },
+  caution: { box: "bg-[#FDF1D0] border-[#17151F]", title: "Review risk: caution", Icon: AlertTriangle, icon: "text-[#B07D00]" },
+  high: { box: "bg-[#FDECEC] border-[#D64545]", title: "Review risk: HIGH", Icon: ShieldAlert, icon: "text-[#D64545]" },
+} as const;
+
+/** Why this PR is easy or hard to review safely (computed by the server from the capsule). */
+function RiskBanner({ risk }: { risk: PullRequestRisk }) {
+  const s = RISK_STYLE[risk.level];
+  return (
+    <div className={`border-2 rounded-2xl p-4 space-y-2 ${s.box}`} role={risk.level === "low" ? undefined : "alert"}>
+      <div className="flex flex-wrap items-center gap-2">
+        <s.Icon className={`w-5 h-5 ${s.icon}`} />
+        <p className="font-display font-extrabold text-[#17151F]">{s.title}</p>
+        <span className="text-xs font-mono text-[#5A5870]">
+          {risk.files} files · {risk.lines} changed lines
+        </span>
+      </div>
+      {risk.reasons.length === 0 ? (
+        <p className="text-xs text-[#17151F]">Small change, verified in the sandbox. A normal review is enough.</p>
+      ) : (
+        <ul className="space-y-1">
+          {risk.reasons.map((r, i) => (
+            <li key={i} className="text-xs text-[#17151F] flex gap-2">
+              <span
+                className={`shrink-0 self-start whitespace-nowrap mt-0.5 px-1.5 rounded-full text-[9px] font-extrabold uppercase ${
+                  r.level === "high" ? "bg-[#D64545] text-white" : "bg-[#F9D56E] text-[#17151F]"
+                }`}
+              >
+                {r.level}
+              </span>
+              <span>{r.text}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {risk.level === "high" && (
+        <p className="text-xs font-semibold text-[#D64545]">
+          The pull request will be opened as a draft, and you must confirm before it is created.
+        </p>
+      )}
+      {risk.level === "caution" && (
+        <p className="text-xs text-[#5A5870]">Opening it as a draft is recommended so it is reviewed before anyone merges it.</p>
+      )}
+    </div>
+  );
+}
+
+const LEVEL_CHIP: Record<PullRequestRisk["level"], string> = {
+  low: "bg-[#B9E4A1] text-[#17151F]",
+  caution: "bg-[#F9D56E] text-[#17151F]",
+  high: "bg-[#D64545] text-white",
+};
+
+/** The stacked PRs, in merge order, each with its own size and review risk. */
+function StackList({ split }: { split: PullRequestSplit }) {
+  const [open, setOpen] = useState<number | null>(null);
+  const prs = split.prs ?? [];
+  return (
+    <div className="bg-white border-2 border-[#17151F] rounded-2xl p-4 space-y-2">
+      <p className="text-xs text-[#5A5870]">
+        Merge in order. Each PR is based on the previous one, so it shows only its own change; when one is merged, GitHub
+        retargets the next. {split.note}
+      </p>
+      <ol className="space-y-2">
+        {prs.map((p, i) => {
+          const g = split.groups?.[i];
+          const r = p.risk;
+          return (
+            <li key={p.branch} className="border border-[#17151F]/20 rounded-xl p-2.5">
+              <button type="button" onClick={() => setOpen(open === i ? null : i)} className="w-full text-left flex items-start gap-2">
+                <span className="font-mono text-xs font-bold text-[#5A5870] pt-0.5">{i + 1}</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-bold text-[#17151F] break-words">{g?.title ?? p.title}</p>
+                  <p className="text-[11px] font-mono text-[#5A5870]">
+                    {p.files_changed.length} file(s) · +{g?.insertions ?? 0} / -{g?.deletions ?? 0}
+                    {g && g.risk_reduction > 0 ? ` · −${g.risk_reduction} risk` : ""}
+                    {g?.kind === "quick_wins" ? " · manifest only" : ""}
+                  </p>
+                </div>
+                {r && (
+                  <span className={`shrink-0 self-start px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${LEVEL_CHIP[r.level]}`}>
+                    {r.level}
+                  </span>
+                )}
+              </button>
+              {open === i && r && r.reasons.length > 0 && (
+                <ul className="mt-2 pl-6 space-y-1">
+                  {r.reasons.map((x, k) => (
+                    <li key={k} className="text-[11px] text-[#17151F]">
+                      <b className="uppercase text-[9px]">{x.level}</b> {x.text}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 /**
  * Deliver the tested migration: as a GitHub pull request (branch from the analysed commit, files byte-for-byte from
  * the migrated workspace that passed in Docker, capsule as the description) or as a patch to apply locally.
@@ -49,6 +168,17 @@ export function PullRequestDialog({ analysisId, repoUrl, onClose }: { analysisId
   const [draft, setDraft] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [showBody, setShowBody] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const [split, setSplit] = useState<PullRequestSplit | null>(null);
+  const [mode, setMode] = useState<"single" | "split">("single");
+  const splitMode = mode === "split" && !!split?.available;
+  // the gate applies to whatever is about to be opened: the single PR, or every part of the stack
+  const risks = (splitMode ? (split?.prs ?? []).map((p) => p.risk) : [plan?.risk]).filter(
+    (r): r is PullRequestRisk => !!r,
+  );
+  const risk = risks.find((r) => r.require_confirm) ?? risks.find((r) => r.level === "caution") ?? risks[0];
+  const draftForced = !splitMode && !!risk?.force_draft;
+  const confirmed = !risk?.require_confirm || confirmText.trim() === risk.confirm_phrase;
 
   useEffect(() => {
     let cancelled = false;
@@ -57,8 +187,15 @@ export function PullRequestDialog({ analysisId, repoUrl, onClose }: { analysisId
         const prev = await getPullRequest(analysisId);
         if (cancelled) return;
         if (prev) setExisting(prev);
-        const p = await previewPullRequest(analysisId);
-        if (!cancelled) setPlan(p);
+        const { plan: p, split: s } = await previewPullRequest(analysisId);
+        if (!cancelled) {
+          setPlan(p);
+          setSplit(s ?? null);
+          if (p.risk && p.risk.level !== "low") {
+            setDraft(true); // risky changes start as drafts
+            if (s?.available) setMode("split"); // and as small PRs when the change can be split
+          }
+        }
       } catch (e: any) {
         if (!cancelled) setError(e.message || "Could not prepare the pull request");
       } finally {
@@ -81,7 +218,13 @@ export function PullRequestDialog({ analysisId, repoUrl, onClose }: { analysisId
     setSubmitting(true);
     setError(null);
     try {
-      const res = await createPullRequest(analysisId, token.trim(), draft);
+      const res = await createPullRequest(
+        analysisId,
+        token.trim(),
+        draft || draftForced,
+        confirmText.trim() || undefined,
+        splitMode,
+      );
       setExisting(res);
     } catch (e: any) {
       setError(e.message || "GitHub refused the request");
@@ -147,7 +290,50 @@ export function PullRequestDialog({ analysisId, repoUrl, onClose }: { analysisId
             <p className="text-sm font-semibold text-[#D64545] bg-[#FDECEC] border-2 border-[#D64545] rounded-2xl px-4 py-2">{error}</p>
           )}
 
-          {plan && (
+          {tab === "pr" && plan && split && !existing && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="How to deliver">
+              {([
+                {
+                  k: "single",
+                  title: "One pull request",
+                  sub: `${plan.files_changed.length} files · ${plan.risk?.lines ?? 0} changed lines`,
+                  Icon: GitPullRequest,
+                },
+                {
+                  k: "split",
+                  title: split.available ? `${split.prs?.length ?? 0} smaller stacked PRs` : "Smaller stacked PRs",
+                  sub: split.available ? "Quick wins first, then one PR per code rewrite" : split.reason ?? "Not available",
+                  Icon: Layers,
+                },
+              ] as const).map((o) => {
+                const disabled = o.k === "split" && !split.available;
+                const active = (o.k === "split") === splitMode;
+                return (
+                  <button
+                    key={o.k}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    disabled={disabled}
+                    onClick={() => setMode(o.k)}
+                    className={`text-left rounded-2xl border-2 p-3 transition ${
+                      active ? "border-[#17151F] bg-[#F9D56E] shadow-[2px_2px_0_0_#17151F]" : "border-[#17151F]/30 bg-white"
+                    } ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                  >
+                    <span className="flex items-center gap-1.5 text-sm font-bold text-[#17151F]">
+                      <o.Icon className="w-4 h-4" /> {o.title}
+                    </span>
+                    <span className="block text-[11px] text-[#5A5870] mt-0.5">{o.sub}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {!existing && !(splitMode && tab === "pr") && plan?.risk && <RiskBanner risk={plan.risk} />}
+          {!existing && splitMode && split && tab === "pr" && <StackList split={split} />}
+
+          {plan && !(splitMode && tab === "pr") && (
             <div className="bg-white border-2 border-[#17151F] rounded-2xl p-4 space-y-2 text-sm">
               <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
                 <GitBranch className="w-4 h-4" />
@@ -174,6 +360,7 @@ export function PullRequestDialog({ analysisId, repoUrl, onClose }: { analysisId
 
           {tab === "pr" && plan && (
             <>
+              {!splitMode && (
               <div className="bg-white border-2 border-[#17151F] rounded-2xl p-4 space-y-2">
                 <div className="flex items-center justify-between">
                   <p className="text-sm font-bold text-[#17151F]">{plan.title}</p>
@@ -189,12 +376,29 @@ export function PullRequestDialog({ analysisId, repoUrl, onClose }: { analysisId
                   <pre className="bg-[#F5F1E8] rounded-xl p-3 text-[11px] font-mono whitespace-pre-wrap max-h-72 overflow-y-auto">{plan.body}</pre>
                 )}
               </div>
+              )}
 
               {existing ? (
                 <div className="bg-[#B9E4A1] border-2 border-[#17151F] rounded-2xl p-4 space-y-1">
                   <p className="font-bold text-[#17151F] flex items-center gap-2">
-                    <Check className="w-4 h-4" /> Pull request #{existing.number} is open
+                    <Check className="w-4 h-4" />{" "}
+                    {existing.stack && existing.stack.length > 1
+                      ? `${existing.stack.length} stacked pull requests are open (merge in order)`
+                      : `Pull request #${existing.number} is open`}
                   </p>
+                  {existing.stack && existing.stack.length > 1 && (
+                    <ol className="space-y-1 list-decimal pl-5">
+                      {existing.stack.map((s) => (
+                        <li key={s.number} className="text-xs text-[#17151F]">
+                          <a href={s.url} target="_blank" rel="noreferrer" className="underline font-semibold">
+                            #{s.number}
+                          </a>{" "}
+                          {s.title}
+                          {s.draft ? " (draft)" : ""}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
                   <p className="text-xs text-[#17151F]">
                     Branch <span className="font-mono">{existing.head}</span>
                     {existing.forked ? " (pushed to your fork — you had no write access to the repository)" : ""} ·{" "}
@@ -222,22 +426,66 @@ export function PullRequestDialog({ analysisId, repoUrl, onClose }: { analysisId
                     className="w-full rounded-xl border-2 border-[#17151F] px-3 py-2 font-mono text-sm bg-[#F5F1E8] focus:outline-none focus:ring-2 focus:ring-[#6E56D9]"
                   />
                   <p className="text-[11px] text-[#5A5870] leading-relaxed">
-                    Use a fine-grained token with <b>Contents: read &amp; write</b> and <b>Pull requests: read &amp; write</b>. If
-                    it cannot push to {plan.owner}/{plan.repo}, DepExit forks the repository to your account and opens the PR from
-                    there. The token is sent once for this request; it is not stored by DepExit.
+                    Use a fine-grained token with <b>Contents: read &amp; write</b> and <b>Pull requests: read &amp; write</b>.{" "}
+                    {splitMode ? (
+                      <>
+                        Stacked PRs need <b>write access to {plan.owner}/{plan.repo}</b> (each PR is based on the previous
+                        one&apos;s branch, which cannot live in a fork); without it, choose <b>One pull request</b>.
+                      </>
+                    ) : (
+                      <>
+                        If it cannot push to {plan.owner}/{plan.repo}, DepExit forks the repository to your account and opens the
+                        PR from there.
+                      </>
+                    )}{" "}
+                    The token is sent once for this request; it is not stored by DepExit.
                   </p>
+                  {risk?.require_confirm && (
+                    <div className="space-y-1">
+                      <label className="block text-xs font-bold text-[#D64545]" htmlFor="pr-confirm">
+                        Type &quot;{risk.confirm_phrase}&quot; to confirm you will review this change before merging
+                      </label>
+                      <input
+                        id="pr-confirm"
+                        type="text"
+                        autoComplete="off"
+                        value={confirmText}
+                        onChange={(e) => setConfirmText(e.target.value)}
+                        placeholder={risk.confirm_phrase}
+                        className="w-full rounded-xl border-2 border-[#D64545] px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#D64545]"
+                      />
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-3">
-                    <label className="text-xs font-semibold text-[#17151F] flex items-center gap-2 cursor-pointer select-none">
-                      <input type="checkbox" checked={draft} onChange={(e) => setDraft(e.target.checked)} /> Open as draft
+                    <label
+                      className={`text-xs font-semibold text-[#17151F] flex items-center gap-2 select-none ${
+                        draftForced ? "opacity-70" : "cursor-pointer"
+                      }`}
+                      title={draftForced ? "High review risk: always opened as a draft" : undefined}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={draft || draftForced}
+                        disabled={draftForced}
+                        onChange={(e) => setDraft(e.target.checked)}
+                      />{" "}
+                      Open as draft{draftForced ? " (required)" : ""}
+                      {splitMode && risks.some((r) => r.force_draft) ? " (high-risk parts are always drafts)" : ""}
                     </label>
                     <button
                       type="button"
-                      disabled={!token.trim() || submitting}
+                      disabled={!token.trim() || submitting || !confirmed}
                       onClick={submit}
                       className="btn-primary text-xs! py-2! px-4! flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {submitting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitPullRequest className="w-3.5 h-3.5" />}
-                      {submitting ? "Opening pull request…" : "Open pull request"}
+                      {submitting
+                        ? splitMode
+                          ? "Opening pull requests…"
+                          : "Opening pull request…"
+                        : splitMode
+                          ? `Open ${split?.prs?.length ?? 0} pull requests`
+                          : "Open pull request"}
                     </button>
                   </div>
                 </div>

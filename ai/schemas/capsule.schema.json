@@ -18,6 +18,62 @@
       "title": "Alt",
       "type": "object"
     },
+    "AltRisk": {
+      "properties": {
+        "package": {
+          "title": "Package",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "enum": [
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "none"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Level"
+        }
+      },
+      "required": [
+        "package"
+      ],
+      "title": "AltRisk",
+      "type": "object"
+    },
     "BlastEdge": {
       "properties": {
         "from": {
@@ -207,6 +263,14 @@
           "title": "Edges",
           "type": "array"
         },
+        "entry_points": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Entry Points",
+          "type": "array"
+        },
         "stats": {
           "additionalProperties": {
             "type": "integer"
@@ -230,6 +294,50 @@
         "provenance"
       ],
       "title": "BlastRadius",
+      "type": "object"
+    },
+    "ChangeCost": {
+      "properties": {
+        "score": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Score",
+          "type": "integer"
+        },
+        "level": {
+          "enum": [
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "files": {
+          "title": "Files",
+          "type": "integer"
+        },
+        "lines": {
+          "title": "Lines",
+          "type": "integer"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        }
+      },
+      "required": [
+        "score",
+        "level",
+        "files",
+        "lines",
+        "reasons"
+      ],
+      "title": "ChangeCost",
       "type": "object"
     },
     "Concern": {
@@ -385,6 +493,36 @@
             }
           ],
           "default": null
+        },
+        "risk_change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiskChange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Priority"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "transitive_vulnerabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TransitiveItem"
+          },
+          "title": "Transitive Vulnerabilities",
+          "type": "array"
         },
         "replacement": {
           "anyOf": [
@@ -600,6 +738,45 @@
       "title": "Gap",
       "type": "object"
     },
+    "Impact": {
+      "properties": {
+        "score": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Score",
+          "type": "integer"
+        },
+        "level": {
+          "enum": [
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "reach_pct": {
+          "title": "Reach Pct",
+          "type": "integer"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        }
+      },
+      "required": [
+        "score",
+        "level",
+        "reach_pct",
+        "reasons"
+      ],
+      "title": "Impact",
+      "type": "object"
+    },
     "Indicator": {
       "properties": {
         "code": {
@@ -700,6 +877,113 @@
         "provenance"
       ],
       "title": "Migration",
+      "type": "object"
+    },
+    "Priority": {
+      "description": "severity x impact picks the label; change cost vs benefit marks quick wins and deferrals.",
+      "properties": {
+        "label": {
+          "enum": [
+            "fix_first",
+            "plan",
+            "monitor",
+            "ok"
+          ],
+          "title": "Label",
+          "type": "string"
+        },
+        "priority": {
+          "title": "Priority",
+          "type": "integer"
+        },
+        "severity": {
+          "title": "Severity",
+          "type": "integer"
+        },
+        "impact": {
+          "$ref": "#/$defs/Impact"
+        },
+        "change_cost": {
+          "$ref": "#/$defs/ChangeCost"
+        },
+        "quick_win": {
+          "title": "Quick Win",
+          "type": "boolean"
+        },
+        "deferred": {
+          "title": "Deferred",
+          "type": "boolean"
+        },
+        "recommendation": {
+          "title": "Recommendation",
+          "type": "string"
+        },
+        "provenance": {
+          "const": "derived",
+          "title": "Provenance",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "priority",
+        "severity",
+        "impact",
+        "change_cost",
+        "quick_win",
+        "deferred",
+        "recommendation",
+        "provenance"
+      ],
+      "title": "Priority",
+      "type": "object"
+    },
+    "PrioritySummary": {
+      "properties": {
+        "counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Counts",
+          "type": "object"
+        },
+        "order": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Order",
+          "type": "array"
+        },
+        "quick_wins": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quick Wins",
+          "type": "array"
+        },
+        "deferred": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Deferred",
+          "type": "array"
+        },
+        "thresholds": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Thresholds",
+          "type": "object"
+        }
+      },
+      "required": [
+        "counts",
+        "order",
+        "quick_wins",
+        "deferred",
+        "thresholds"
+      ],
+      "title": "PrioritySummary",
       "type": "object"
     },
     "Replacement": {
@@ -835,6 +1119,280 @@
         "rationale_provenance"
       ],
       "title": "Risk",
+      "type": "object"
+    },
+    "RiskAfter": {
+      "properties": {
+        "score": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Score",
+          "type": "integer"
+        },
+        "level": {
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "package": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "score",
+        "level"
+      ],
+      "title": "RiskAfter",
+      "type": "object"
+    },
+    "RiskChange": {
+      "description": "Risk of the dependency today vs after its proposed change, scored by the same deterministic engine.",
+      "properties": {
+        "before": {
+          "$ref": "#/$defs/RiskPoint"
+        },
+        "after": {
+          "$ref": "#/$defs/RiskAfter"
+        },
+        "reduction": {
+          "title": "Reduction",
+          "type": "integer"
+        },
+        "reduction_pct": {
+          "title": "Reduction Pct",
+          "type": "integer"
+        },
+        "outcome": {
+          "enum": [
+            "eliminated",
+            "reduced",
+            "unchanged",
+            "increased"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "resolved": {
+          "items": {
+            "$ref": "#/$defs/RiskItem"
+          },
+          "title": "Resolved",
+          "type": "array"
+        },
+        "remaining": {
+          "items": {
+            "$ref": "#/$defs/RiskItem"
+          },
+          "title": "Remaining",
+          "type": "array"
+        },
+        "introduced": {
+          "items": {
+            "$ref": "#/$defs/RiskItem"
+          },
+          "title": "Introduced",
+          "type": "array"
+        },
+        "after_indicators": {
+          "items": {
+            "$ref": "#/$defs/Indicator"
+          },
+          "title": "After Indicators",
+          "type": "array"
+        },
+        "why_chosen": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Why Chosen",
+          "type": "array"
+        },
+        "alternatives": {
+          "items": {
+            "$ref": "#/$defs/AltRisk"
+          },
+          "title": "Alternatives",
+          "type": "array"
+        },
+        "explanation": {
+          "title": "Explanation",
+          "type": "string"
+        },
+        "provenance": {
+          "const": "derived",
+          "title": "Provenance",
+          "type": "string"
+        }
+      },
+      "required": [
+        "before",
+        "after",
+        "reduction",
+        "reduction_pct",
+        "outcome",
+        "resolved",
+        "remaining",
+        "introduced",
+        "after_indicators",
+        "why_chosen",
+        "alternatives",
+        "explanation",
+        "provenance"
+      ],
+      "title": "RiskChange",
+      "type": "object"
+    },
+    "RiskItem": {
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "points": {
+          "title": "Points",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code",
+        "detail",
+        "points"
+      ],
+      "title": "RiskItem",
+      "type": "object"
+    },
+    "RiskPoint": {
+      "properties": {
+        "score": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Score",
+          "type": "integer"
+        },
+        "level": {
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
+          "title": "Level",
+          "type": "string"
+        }
+      },
+      "required": [
+        "score",
+        "level"
+      ],
+      "title": "RiskPoint",
+      "type": "object"
+    },
+    "RiskReduction": {
+      "properties": {
+        "total_before": {
+          "title": "Total Before",
+          "type": "integer"
+        },
+        "total_after": {
+          "title": "Total After",
+          "type": "integer"
+        },
+        "reduced_by": {
+          "title": "Reduced By",
+          "type": "integer"
+        },
+        "reduced_pct": {
+          "title": "Reduced Pct",
+          "type": "integer"
+        },
+        "at_risk_before": {
+          "title": "At Risk Before",
+          "type": "integer"
+        },
+        "at_risk_after": {
+          "title": "At Risk After",
+          "type": "integer"
+        },
+        "max_before": {
+          "title": "Max Before",
+          "type": "integer"
+        },
+        "max_after": {
+          "title": "Max After",
+          "type": "integer"
+        },
+        "by_level_after": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "By Level After",
+          "type": "object"
+        },
+        "eliminated": {
+          "title": "Eliminated",
+          "type": "integer"
+        },
+        "reduced": {
+          "title": "Reduced",
+          "type": "integer"
+        },
+        "unchanged": {
+          "title": "Unchanged",
+          "type": "integer"
+        },
+        "increased": {
+          "title": "Increased",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_before",
+        "total_after",
+        "reduced_by",
+        "reduced_pct",
+        "at_risk_before",
+        "at_risk_after",
+        "max_before",
+        "max_after",
+        "by_level_after",
+        "eliminated",
+        "reduced",
+        "unchanged",
+        "increased"
+      ],
+      "title": "RiskReduction",
       "type": "object"
     },
     "Run": {
@@ -1075,6 +1633,40 @@
         "headline": {
           "title": "Headline",
           "type": "string"
+        },
+        "risk_reduction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiskReduction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrioritySummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "transitive": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transitive"
         }
       },
       "required": [
@@ -1204,6 +1796,162 @@
         "total"
       ],
       "title": "Totals",
+      "type": "object"
+    },
+    "Transitive": {
+      "properties": {
+        "available": {
+          "title": "Available",
+          "type": "boolean"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "approximate": {
+          "title": "Approximate",
+          "type": "boolean"
+        },
+        "total": {
+          "title": "Total",
+          "type": "integer"
+        },
+        "vulnerable": {
+          "title": "Vulnerable",
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/TransitiveItem"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "unchecked": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Unchecked",
+          "type": "array"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "available",
+        "approximate",
+        "total",
+        "vulnerable",
+        "items",
+        "notes"
+      ],
+      "title": "Transitive",
+      "type": "object"
+    },
+    "TransitiveItem": {
+      "description": "A package pulled in by the dependencies (not declared or imported by the project) with known advisories.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        },
+        "depth": {
+          "title": "Depth",
+          "type": "integer"
+        },
+        "dev": {
+          "title": "Dev",
+          "type": "boolean"
+        },
+        "paths": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Paths",
+          "type": "array"
+        },
+        "via": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Via",
+          "type": "array"
+        },
+        "vulnerabilities": {
+          "items": {
+            "$ref": "#/$defs/TransitiveVuln"
+          },
+          "title": "Vulnerabilities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "depth",
+        "dev",
+        "paths",
+        "via",
+        "vulnerabilities"
+      ],
+      "title": "TransitiveItem",
+      "type": "object"
+    },
+    "TransitiveVuln": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "severity": {
+          "title": "Severity",
+          "type": "string"
+        },
+        "fixed_in": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Fixed In",
+          "type": "array"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "summary",
+        "severity",
+        "fixed_in",
+        "url"
+      ],
+      "title": "TransitiveVuln",
       "type": "object"
     },
     "Usage": {
@@ -1349,6 +2097,17 @@
       },
       "title": "Runs",
       "type": "array"
+    },
+    "transitive": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Transitive"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "patch": {
       "title": "Patch",

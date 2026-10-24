@@ -92,6 +92,7 @@ class BlastRadius(BaseModel):
     tests: list[BlastPath]
     nodes: list[BlastNode]
     edges: list[BlastEdge]
+    entry_points: list[str] = []  # program entry files (main.py, cli.py, ...) that reach the dependency
     stats: dict[str, int]
     provenance: Literal["evidence"]
 
@@ -110,6 +111,128 @@ class Replacement(BaseModel):
     alternatives: list[Alt]
     provenance: Literal["ai", "derived"]
     model: str | None = None  # model that produced the decision (Gemma 4 or a disclosed fallback)
+
+
+class RiskPoint(BaseModel):
+    score: int = Field(ge=0, le=100)
+    level: RiskLevel
+
+
+class RiskAfter(RiskPoint):
+    package: str | None = None
+    version: str | None = None
+
+
+class RiskItem(BaseModel):
+    code: str
+    detail: str
+    points: int
+
+
+class AltRisk(BaseModel):
+    package: str
+    version: str | None = None
+    score: int | None = None
+    level: RiskLevel | None = None
+
+
+class RiskChange(BaseModel):
+    """Risk of the dependency today vs after its proposed change, scored by the same deterministic engine."""
+    before: RiskPoint
+    after: RiskAfter
+    reduction: int  # before - after; negative when the change raises the risk
+    reduction_pct: int
+    outcome: Literal["eliminated", "reduced", "unchanged", "increased"]
+    resolved: list[RiskItem]
+    remaining: list[RiskItem]
+    introduced: list[RiskItem]
+    after_indicators: list[Indicator]
+    why_chosen: list[str]
+    alternatives: list[AltRisk]
+    explanation: str
+    provenance: Literal["derived"]
+
+
+class Impact(BaseModel):
+    score: int = Field(ge=0, le=100)
+    level: Literal["high", "medium", "low", "none"]
+    reach_pct: int
+    reasons: list[str]
+
+
+class ChangeCost(BaseModel):
+    score: int = Field(ge=0, le=100)
+    level: Literal["high", "medium", "low", "none"]
+    files: int
+    lines: int
+    reasons: list[str]
+
+
+class Priority(BaseModel):
+    """severity x impact picks the label; change cost vs benefit marks quick wins and deferrals."""
+    label: Literal["fix_first", "plan", "monitor", "ok"]
+    priority: int
+    severity: int
+    impact: Impact
+    change_cost: ChangeCost
+    quick_win: bool
+    deferred: bool
+    recommendation: str
+    provenance: Literal["derived"]
+
+
+class PrioritySummary(BaseModel):
+    counts: dict[str, int]
+    order: list[str]
+    quick_wins: list[str]
+    deferred: list[str]
+    thresholds: dict[str, int]
+
+
+class TransitiveVuln(BaseModel):
+    id: str
+    summary: str
+    severity: str  # critical | high | moderate | medium | low | unknown (as published in OSV)
+    fixed_in: list[str]
+    url: str
+
+
+class TransitiveItem(BaseModel):
+    """A package pulled in by the dependencies (not declared or imported by the project) with known advisories."""
+    name: str
+    version: str
+    depth: int
+    dev: bool
+    paths: list[list[str]]  # "your app" -> direct dependency -> ... -> this package (labels include versions)
+    via: list[str]          # the direct dependencies that bring it in
+    vulnerabilities: list[TransitiveVuln]
+
+
+class Transitive(BaseModel):
+    available: bool
+    source: str | None = None
+    approximate: bool
+    total: int
+    vulnerable: int
+    items: list[TransitiveItem]
+    unchecked: list[str] = []
+    notes: list[str]
+
+
+class RiskReduction(BaseModel):
+    total_before: int
+    total_after: int
+    reduced_by: int
+    reduced_pct: int
+    at_risk_before: int
+    at_risk_after: int
+    max_before: int
+    max_after: int
+    by_level_after: dict[str, int]
+    eliminated: int
+    reduced: int
+    unchanged: int
+    increased: int
 
 
 class Migration(BaseModel):
@@ -164,6 +287,9 @@ class Dependency(BaseModel):
     risk: Risk
     usage: Usage
     blast_radius: BlastRadius | None = None
+    risk_change: RiskChange | None = None
+    priority: Priority | None = None
+    transitive_vulnerabilities: list[TransitiveItem] = []  # vulnerable packages this dependency brings in
     replacement: Replacement | None = None
     migration: Migration | None = None
     suggested_tests: list[SuggestedTest]
@@ -216,6 +342,9 @@ class Summary(BaseModel):
     gaps: dict[str, int]
     verdict: Literal["safe_to_migrate", "migrate_with_care", "blocked"]
     headline: str
+    risk_reduction: RiskReduction | None = None
+    priority: PrioritySummary | None = None
+    transitive: dict | None = None  # {total, vulnerable, runtime_vulnerable}
 
 
 class Capsule(BaseModel):
@@ -228,5 +357,6 @@ class Capsule(BaseModel):
     summary: Summary
     dependencies: list[Dependency]
     runs: list[Run]
+    transitive: Transitive | None = None
     patch: dict
     limitations: list[str] = Field(min_length=1)

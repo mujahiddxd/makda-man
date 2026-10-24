@@ -88,7 +88,7 @@ def load_run(job_dir: Path, run_id: str, repo_for_collection: Path | None = None
         "id": run_id,
         "kind": res.get("kind", "baseline" if run_id == "baseline" else "migrated"),
         "image": res.get("image", "python:3.12-slim"),
-        "command": res.get("command", []),
+        "command": res.get("command") or [],  # Go writes a nil slice as null when install fails
         "status": status,
         "install_exit_code": res.get("install_exit_code"),
         "test_exit_code": res.get("test_exit_code"),

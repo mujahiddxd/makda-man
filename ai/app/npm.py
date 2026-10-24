@@ -190,6 +190,38 @@ def import_graph(repo: Path) -> dict[str, set[str]]:
     return graph
 
 
+def package_indicators(name: str, pv: str | None, f: dict | None, vulns: list[dict] | None) -> list[dict]:
+    """Registry-level risk of one npm package version; shared by the scan and the risk projection."""
+    inds: list[dict] = []
+    ev_reg = {"source": "npm", "url": f"https://www.npmjs.com/package/{name}"}
+    if f and not f.get("_missing"):
+        latest = f.get("latest")
+        pv_t, lv_t = _semver(pv), _semver(latest)
+        if pv_t and lv_t and lv_t > pv_t:
+            majors = lv_t[0] - pv_t[0]
+            if majors >= 1 or (pv_t[0] == 0 and lv_t[1] > pv_t[1]):  # 0.x: a minor bump is breaking in semver
+                inds.append(_ind("MAJOR_VERSIONS_BEHIND", "medium", f"Installed {pv}, latest {latest} ({max(majors, 1)} major behind)",
+                                 [ev_reg], "derived", majors=max(majors, 1)))
+            else:
+                inds.append(_ind("OUTDATED", "low", f"Installed {pv}, latest {latest}", [ev_reg], "derived"))
+        age = _days_since(f.get("latest_time"))
+        if age is not None and age > TWO_YEARS:
+            inds.append(_ind("UNMAINTAINED", "medium", f"No release since {f['latest_time'][:10]} ({age // 365} years)", [ev_reg]))
+        dep_msg = ((f.get("versions") or {}).get(pv or "") or {}).get("deprecated") or f.get("deprecated_latest")
+        if dep_msg:
+            inds.append(_ind("DEPRECATED_PACKAGE", "high", f"npm deprecation notice: {str(dep_msg)[:200]}",
+                             [{**ev_reg, "detail": str(dep_msg)[:200]}]))
+    elif f and f.get("_missing"):
+        inds.append(_ind("UNMAINTAINED", "medium", "Package not found on the npm registry", [{"source": "npm", "detail": "404"}]))
+    vs = vulns or []
+    if vs:
+        sev = "critical" if any(str((v.get("database_specific") or {}).get("severity", "")).upper() == "CRITICAL" for v in vs) else "high"
+        inds.append(_ind("KNOWN_VULNERABILITY", sev, f"{len(vs)} advisories affect {pv}",
+                         [{"source": "osv", "ref": v.get("id"), "url": f"https://osv.dev/vulnerability/{v.get('id')}",
+                           "detail": (v.get("summary") or "")[:160]} for v in vs[:8]], count=len(vs)))
+    return inds
+
+
 async def scan(repo: Path) -> dict:
     decls, installed, notes = manifests(repo)
     used = imports(repo)
@@ -226,7 +258,6 @@ async def scan(repo: Path) -> dict:
     for name in names:
         ds, f, pv = by_name.get(name, []), facts[name], pinned[name]
         inds: list[dict] = []
-        ev_reg = {"source": "npm", "url": f"https://www.npmjs.com/package/{name}"}
         if not ds:
             detail = "Imported but not declared in package.json"
             if name in installed:
@@ -242,31 +273,7 @@ async def scan(repo: Path) -> dict:
             if rng in ("*", "", "latest", "x") or rng.startswith(("git", "http", "github:")):
                 inds.append(_ind("UNPINNED", "low", f"Unbounded version range '{rng or '*'}'",
                                  [{"source": "manifest", "ref": f"package.json:{ds[0]['line']}"}]))
-        if f and not f.get("_missing"):
-            latest = f.get("latest")
-            pv_t, lv_t = _semver(pv), _semver(latest)
-            if pv_t and lv_t and lv_t > pv_t:
-                majors = lv_t[0] - pv_t[0]
-                if majors >= 1 or (pv_t[0] == 0 and lv_t[1] > pv_t[1]):  # 0.x: a minor bump is breaking in semver
-                    inds.append(_ind("MAJOR_VERSIONS_BEHIND", "medium", f"Installed {pv}, latest {latest} ({max(majors, 1)} major behind)",
-                                     [ev_reg], "derived", majors=max(majors, 1)))
-                else:
-                    inds.append(_ind("OUTDATED", "low", f"Installed {pv}, latest {latest}", [ev_reg], "derived"))
-            age = _days_since(f.get("latest_time"))
-            if age is not None and age > TWO_YEARS:
-                inds.append(_ind("UNMAINTAINED", "medium", f"No release since {f['latest_time'][:10]} ({age // 365} years)", [ev_reg]))
-            dep_msg = ((f.get("versions") or {}).get(pv or "") or {}).get("deprecated") or f.get("deprecated_latest")
-            if dep_msg:
-                inds.append(_ind("DEPRECATED_PACKAGE", "high", f"npm deprecation notice: {str(dep_msg)[:200]}",
-                                 [{**ev_reg, "detail": str(dep_msg)[:200]}]))
-        elif f and f.get("_missing"):
-            inds.append(_ind("UNMAINTAINED", "medium", "Package not found on the npm registry", [{"source": "npm", "detail": "404"}]))
-        vs = vulns.get(name) or []
-        if vs:
-            sev = "critical" if any(str((v.get("database_specific") or {}).get("severity", "")).upper() == "CRITICAL" for v in vs) else "high"
-            inds.append(_ind("KNOWN_VULNERABILITY", sev, f"{len(vs)} advisories affect {pv}",
-                             [{"source": "osv", "ref": v.get("id"), "url": f"https://osv.dev/vulnerability/{v.get('id')}",
-                               "detail": (v.get("summary") or "")[:160]} for v in vs[:8]], count=len(vs)))
+        inds += package_indicators(name, pv, f, vulns.get(name))
         s, lvl = risk.score(inds)
         deps.append({
             "name": name, "import_names": [name],

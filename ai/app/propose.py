@@ -7,7 +7,7 @@ from pathlib import Path
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import Version
 
-from . import gemma, knowledge, pysrc, registry, risk, state
+from . import gemma, knowledge, priority, projection, pysrc, registry, risk, state
 from .prompts import Decision, decide
 
 
@@ -17,7 +17,21 @@ def _needs_proposal(d: dict, min_level: str) -> bool:
             or bool(codes & {"UNDECLARED", "DECLARED_UNUSED", "DEPRECATED_PACKAGE", "KNOWN_VULNERABILITY"}))
 
 
-async def _candidate_health(dep: dict, ecosystem: str = "python") -> list[dict]:
+async def _with_risk(cand: dict, py: str, ecosystem: str) -> dict:
+    """Add the candidate's own risk score (same engine as the scan) so the AI can pick the lower-risk option."""
+    if cand.get("latest_version"):
+        inds, _ = await projection.package_risk(cand["candidate"], cand["latest_version"], py, ecosystem)
+        cand["risk_score"], cand["risk_level"] = risk.score(inds)
+        cand["risk_flags"] = sorted({i["code"] for i in inds})
+    return cand
+
+
+async def _candidate_health(dep: dict, ecosystem: str = "python", py: str = "3.12") -> list[dict]:
+    out = await _candidate_facts(dep, ecosystem)
+    return list(await asyncio.gather(*(_with_risk(c, py, ecosystem) for c in out)))
+
+
+async def _candidate_facts(dep: dict, ecosystem: str = "python") -> list[dict]:
     if ecosystem == "npm":
         f = await registry.npm_package(dep["name"])
         if not f or f.get("_missing"):
@@ -98,8 +112,11 @@ async def _one(dep: dict, py: str, others: list[str], log: gemma.CallLog, ecosys
     facts = {k: dep.get(k) for k in ("name", "pinned_version", "latest_version", "latest_release_date",
                                      "requires_python", "declared", "import_names", "group")}
     facts["risk_level"] = dep["risk"]["level"]
+    facts["risk_score"] = dep["risk"]["score"]
+    imp = priority.impact(dep.get("blast_radius"), dep.get("usage"), dep.get("group") or "main")
+    facts["impact"] = {"score": imp["score"], "reach_pct": imp["reach_pct"], "why": imp["reasons"]}
     facts["indicators"] = [{"code": i["code"], "detail": i["detail"]} for i in dep["risk"]["indicators"]]
-    cands = await _candidate_health(dep, ecosystem)
+    cands = await _candidate_health(dep, ecosystem, py)
     prompt = decide(py if ecosystem == "python" else "Node.js (npm)", facts, usage_lines, cands, others, ecosystem)
     for attempt in range(2):
         dec = await gemma.complete_json(log, f"decide:{dep['name']}", prompt, Decision)
@@ -136,4 +153,10 @@ async def run(job_dir: Path, py: str, min_level: str, log: gemma.CallLog, ecosys
                                 "rationale": "Low risk; no migration needed." if strat == "keep" else "Minor update available.",
                                 "confidence": 0.9, "alternatives": [], "steps": [], "code_changes_needed": False,
                                 "suggested_tests": [], "open_concerns": [], "provenance": "derived"}
+    # score what every proposal installs with the same engine, for the before -> after comparison
+    by_name = {d["name"]: d for d in deps}
+    names = list(proposals)
+    projected = await asyncio.gather(*(projection.project(by_name[n], proposals[n], py, ecosystem) for n in names))
+    for n, raw in zip(names, projected):
+        proposals[n]["projection"] = raw
     return {"proposals": proposals}

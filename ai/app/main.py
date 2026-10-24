@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import capsule, compare, config, gemma, materialize, npm, propose, scan, state, usage
+from . import capsule, compare, config, gemma, materialize, npm, propose, scan, state, transitive, usage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("depexit.ai")
@@ -113,6 +113,11 @@ async def scan_ep(req: JobReq):
     else:
         out = await scan.run(repo, req.python_version, log_)
         out["ecosystem"] = "python"
+    try:  # what the dependencies pull in, checked against OSV; never fails or stalls the scan
+        out["transitive"] = await asyncio.wait_for(transitive.analyse(repo, out, req.python_version), timeout=120)
+    except Exception as e:  # noqa: BLE001 (incl. timeout)
+        out["transitive"] = {"available": False, "source": None, "approximate": False, "total": 0, "vulnerable": 0,
+                             "items": [], "notes": [f"Transitive dependency check skipped: {type(e).__name__} {e}"[:200]]}
     state.write(job, "scan.json", out)
     return {**out, "ai_calls": log_.calls}
 

@@ -87,6 +87,82 @@ def _requires_names(requires_dist: list[str]) -> set[str]:
     return out
 
 
+def package_indicators(name: str, pinned: str | None, f: dict, py_t: tuple[int, int]) -> list[dict]:
+    """Registry-level risk of one package version (advisories, freshness, deprecation, Python support).
+    Shared by the scan (the installed version) and the risk projection (the proposed package/version)."""
+    inds: list[dict] = []
+    if f.get("exists"):
+        latest = f.get("latest_version")
+        pv, lv = _parse_version(pinned), _parse_version(latest)
+        pypi_ev = {"source": "pypi", "url": f"https://pypi.org/project/{name}/"}
+        vulns = f.get("vulns") or []
+        if vulns:
+            ids = [v.get("id") for v in vulns]
+            fixed = sorted({e.get("fixed") for v in vulns for a in v.get("affected", []) for r in a.get("ranges", [])
+                            for e in r.get("events", []) if e.get("fixed")}, key=lambda s: _parse_version(s) or Version("0"))
+            detail = f"{len(vulns)} advisories affect {pinned}"
+            if fixed:
+                detail += f"; fixed in {fixed[-1]}"
+            sev = "critical" if any(_osv_severity(v) == "critical" for v in vulns) else "high"
+            inds.append(_ind("KNOWN_VULNERABILITY", sev, detail,
+                             [{"source": "osv", "ref": v.get("id"), "url": f"https://osv.dev/vulnerability/{v.get('id')}",
+                               "detail": (v.get("summary") or "")[:160]} for v in vulns[:8]], count=len(vulns)))
+        if pv and lv and lv > pv:
+            majors = lv.major - pv.major
+            if majors >= 1:
+                inds.append(_ind("MAJOR_VERSIONS_BEHIND", "medium",
+                                 f"Pinned {pinned}, latest {latest} ({majors} major{'s' if majors > 1 else ''} behind)",
+                                 [pypi_ev], "derived", majors=majors))
+            else:
+                inds.append(_ind("OUTDATED", "low", f"Pinned {pinned}, latest {latest}", [pypi_ev], "derived"))
+        age = _days_since(f.get("latest_release_date"))
+        if age is not None and age > TWO_YEARS_DAYS:
+            inds.append(_ind("UNMAINTAINED", "medium",
+                             f"No release since {f['latest_release_date']} ({age // 365} years)", [pypi_ev]))
+        inactive = any("Development Status :: 7 - Inactive" in c for c in f.get("classifiers", []))
+        deprecated_text = re.search(r"\b(deprecated|no longer maintained|unmaintained)\b", f.get("summary", ""), re.I)
+        if name in knowledge.DEPRECATED_PACKAGES or inactive or deprecated_text:
+            ev = []
+            if name in knowledge.DEPRECATED_PACKAGES:
+                ev.append({"source": "knowledge", "detail": knowledge.DEPRECATED_PACKAGES[name]})
+            if inactive:
+                ev.append({"source": "pypi", "detail": "Classifier: Development Status :: 7 - Inactive", "url": pypi_ev["url"]})
+            if deprecated_text:
+                ev.append({"source": "pypi", "detail": f"Summary: {f.get('summary')}", "url": pypi_ev["url"]})
+            inds.append(_ind("DEPRECATED_PACKAGE", "high",
+                             knowledge.DEPRECATED_PACKAGES.get(name, "Marked deprecated/inactive on PyPI"), ev))
+        if name in knowledge.STDLIB_REPLACEMENTS:
+            mod, since = knowledge.STDLIB_REPLACEMENTS[name]
+            if py_t >= since:
+                inds.append(_ind("STDLIB_REPLACEMENT_AVAILABLE", "medium",
+                                 f"Standard library alternative: {mod} (Python {since[0]}.{since[1]}+)",
+                                 [{"source": "knowledge", "detail": f"{name} -> {mod}"}]))
+        if f.get("yanked"):
+            inds.append(_ind("YANKED", "high", f"{pinned} was yanked: {f.get('yanked_reason') or 'no reason given'}", [pypi_ev]))
+        # metadata-only Python compatibility signal (strong signal comes later from the sandbox)
+        rp = f.get("requires_python_pinned")
+        if rp:
+            try:
+                if not SpecifierSet(rp).contains(Version(f"{py_t[0]}.{py_t[1]}")):
+                    inds.append(_ind("PY312_INCOMPATIBLE", "high", f"{pinned} declares requires_python '{rp}'", [pypi_ev]))
+            except (InvalidVersion, ValueError):
+                pass
+        pinned_age = _days_since(f.get("last_release_of_pinned"))
+        cls = f.get("classifiers_pinned") or []
+        py3x = [c for c in cls if re.match(r"Programming Language :: Python :: 3\.\d+$", c)]
+        if pinned and pinned_age and pinned_age > TWO_YEARS_DAYS and py3x and not any(
+                c.endswith(f"3.{py_t[1]}") for c in py3x):
+            newest = max(py3x, key=lambda c: int(c.rsplit(".", 1)[1])).rsplit(" ", 1)[1]
+            if not any(i["code"] == "PY312_INCOMPATIBLE" for i in inds):
+                inds.append(_ind("PY312_INCOMPATIBLE", "low",
+                                 f"{pinned} ({f.get('last_release_of_pinned')}) only declares support up to Python {newest}",
+                                 [pypi_ev]))
+    else:
+        inds.append(_ind("UNMAINTAINED", "medium", "Package not found on PyPI", [{"source": "pypi", "detail": "404"}]))
+
+    return inds
+
+
 async def run(repo: Path, py: str, log: gemma.CallLog) -> dict:
     ms = manifests.discover(repo)
     imports = pysrc.top_level_imports(repo)
@@ -163,74 +239,7 @@ async def run(repo: Path, py: str, log: gemma.CallLog) -> dict:
                 inds.append(_ind("UNPINNED", "low", "No version constraint",
                                  [{"source": "manifest", "ref": f"{decls[0].file}:{decls[0].line}"}]))
 
-        if f.get("exists"):
-            latest = f.get("latest_version")
-            pv, lv = _parse_version(pinned), _parse_version(latest)
-            pypi_ev = {"source": "pypi", "url": f"https://pypi.org/project/{name}/"}
-            vulns = f.get("vulns") or []
-            if vulns:
-                ids = [v.get("id") for v in vulns]
-                fixed = sorted({e.get("fixed") for v in vulns for a in v.get("affected", []) for r in a.get("ranges", [])
-                                for e in r.get("events", []) if e.get("fixed")}, key=lambda s: _parse_version(s) or Version("0"))
-                detail = f"{len(vulns)} advisories affect {pinned}"
-                if fixed:
-                    detail += f"; fixed in {fixed[-1]}"
-                sev = "critical" if any(_osv_severity(v) == "critical" for v in vulns) else "high"
-                inds.append(_ind("KNOWN_VULNERABILITY", sev, detail,
-                                 [{"source": "osv", "ref": v.get("id"), "url": f"https://osv.dev/vulnerability/{v.get('id')}",
-                                   "detail": (v.get("summary") or "")[:160]} for v in vulns[:8]], count=len(vulns)))
-            if pv and lv and lv > pv:
-                majors = lv.major - pv.major
-                if majors >= 1:
-                    inds.append(_ind("MAJOR_VERSIONS_BEHIND", "medium",
-                                     f"Pinned {pinned}, latest {latest} ({majors} major{'s' if majors > 1 else ''} behind)",
-                                     [pypi_ev], "derived", majors=majors))
-                else:
-                    inds.append(_ind("OUTDATED", "low", f"Pinned {pinned}, latest {latest}", [pypi_ev], "derived"))
-            age = _days_since(f.get("latest_release_date"))
-            if age is not None and age > TWO_YEARS_DAYS:
-                inds.append(_ind("UNMAINTAINED", "medium",
-                                 f"No release since {f['latest_release_date']} ({age // 365} years)", [pypi_ev]))
-            inactive = any("Development Status :: 7 - Inactive" in c for c in f.get("classifiers", []))
-            deprecated_text = re.search(r"\b(deprecated|no longer maintained|unmaintained)\b", f.get("summary", ""), re.I)
-            if name in knowledge.DEPRECATED_PACKAGES or inactive or deprecated_text:
-                ev = []
-                if name in knowledge.DEPRECATED_PACKAGES:
-                    ev.append({"source": "knowledge", "detail": knowledge.DEPRECATED_PACKAGES[name]})
-                if inactive:
-                    ev.append({"source": "pypi", "detail": "Classifier: Development Status :: 7 - Inactive", "url": pypi_ev["url"]})
-                if deprecated_text:
-                    ev.append({"source": "pypi", "detail": f"Summary: {f.get('summary')}", "url": pypi_ev["url"]})
-                inds.append(_ind("DEPRECATED_PACKAGE", "high",
-                                 knowledge.DEPRECATED_PACKAGES.get(name, "Marked deprecated/inactive on PyPI"), ev))
-            if name in knowledge.STDLIB_REPLACEMENTS:
-                mod, since = knowledge.STDLIB_REPLACEMENTS[name]
-                if py_t >= since:
-                    inds.append(_ind("STDLIB_REPLACEMENT_AVAILABLE", "medium",
-                                     f"Standard library alternative: {mod} (Python {since[0]}.{since[1]}+)",
-                                     [{"source": "knowledge", "detail": f"{name} -> {mod}"}]))
-            if f.get("yanked"):
-                inds.append(_ind("YANKED", "high", f"{pinned} was yanked: {f.get('yanked_reason') or 'no reason given'}", [pypi_ev]))
-            # metadata-only Python compatibility signal (strong signal comes later from the sandbox)
-            rp = f.get("requires_python_pinned")
-            if rp:
-                try:
-                    if not SpecifierSet(rp).contains(Version(f"{py_t[0]}.{py_t[1]}")):
-                        inds.append(_ind("PY312_INCOMPATIBLE", "high", f"{pinned} declares requires_python '{rp}'", [pypi_ev]))
-                except (InvalidVersion, ValueError):
-                    pass
-            pinned_age = _days_since(f.get("last_release_of_pinned"))
-            cls = f.get("classifiers_pinned") or []
-            py3x = [c for c in cls if re.match(r"Programming Language :: Python :: 3\.\d+$", c)]
-            if pinned and pinned_age and pinned_age > TWO_YEARS_DAYS and py3x and not any(
-                    c.endswith(f"3.{py_t[1]}") for c in py3x):
-                newest = max(py3x, key=lambda c: int(c.rsplit(".", 1)[1])).rsplit(" ", 1)[1]
-                if not any(i["code"] == "PY312_INCOMPATIBLE" for i in inds):
-                    inds.append(_ind("PY312_INCOMPATIBLE", "low",
-                                     f"{pinned} ({f.get('last_release_of_pinned')}) only declares support up to Python {newest}",
-                                     [pypi_ev]))
-        else:
-            inds.append(_ind("UNMAINTAINED", "medium", "Package not found on PyPI", [{"source": "pypi", "detail": "404"}]))
+        inds += package_indicators(name, pinned, f, py_t)
 
         s, lvl = risk.score(inds)
         deps.append({

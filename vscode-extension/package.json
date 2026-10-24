@@ -32,6 +32,10 @@
         "title": "DepExit: Analyze This Workspace"
       },
       {
+        "command": "depexit.clone",
+        "title": "DepExit: Clone Analysed Repository & Open"
+      },
+      {
         "command": "depexit.load",
         "title": "DepExit: Load Analysis by ID"
       },

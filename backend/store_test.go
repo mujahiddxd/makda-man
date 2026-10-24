@@ -198,4 +198,3 @@ func TestStoreFlatEventsRoundtrip(t *testing.T) {
 		t.Fatalf("expected log message populated, got: %+v", past[2])
 	}
 }
-

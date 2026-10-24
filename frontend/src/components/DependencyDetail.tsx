@@ -5,6 +5,9 @@ import type { Dependency, Run } from "@/lib/types";
 import { RiskBadge, ProvenanceTag, StrategyChip } from "./Shared";
 import { CodeChip, Button } from "./ui/Base";
 import { BlastRadiusGraph } from "./BlastRadiusGraph";
+import { RiskChangeDetail } from "./RiskReduction";
+import { PriorityDetail } from "./PriorityMatrix";
+import { TransitiveItemCard } from "./TransitivePanel";
 import {
   X,
   ExternalLink,
@@ -61,6 +64,31 @@ export function DependencyDetail({
 
         {/* Modal Body - 9 Canonical Sections in exact order */}
         <div className="p-5 md:p-6 overflow-y-auto space-y-8 select-text">
+          {/* Priority: severity x impact x change cost */}
+          {dependency.priority && (
+            <section className="bg-white p-5 rounded-2xl border-[3px] border-[#17151F] shadow-[3px_3px_0_0_#17151F] space-y-3">
+              <h3 className="font-display font-extrabold text-lg text-[#17151F] border-b border-[#17151F]/15 pb-2">
+                Priority
+              </h3>
+              <PriorityDetail p={dependency.priority} />
+            </section>
+          )}
+
+          {dependency.transitive_vulnerabilities && dependency.transitive_vulnerabilities.length > 0 && (
+            <section className="bg-white p-5 rounded-2xl border-[3px] border-[#D64545] shadow-[3px_3px_0_0_#17151F] space-y-3">
+              <h3 className="font-display font-extrabold text-lg text-[#17151F] border-b border-[#17151F]/15 pb-2">
+                Brings in vulnerable packages
+              </h3>
+              <p className="text-xs text-[#5A5870]">
+                {dependency.name} depends on these packages, which have known advisories. Your code does not need to import
+                them for them to be installed.
+              </p>
+              {dependency.transitive_vulnerabilities.map((i) => (
+                <TransitiveItemCard key={`${i.name}@${i.version}`} item={i} />
+              ))}
+            </section>
+          )}
+
           {/* SECTION 1: Details */}
           <section className="bg-white p-5 rounded-2xl border-[3px] border-[#17151F] shadow-[3px_3px_0_0_#17151F] space-y-3">
             <h3 className="font-display font-extrabold text-lg text-[#17151F] border-b border-[#17151F]/15 pb-2">
@@ -369,6 +397,8 @@ export function DependencyDetail({
                 <div className="bg-[#F5F1E8] p-3 rounded-xl border border-[#17151F]/20 text-sm font-medium">
                   <p>{dependency.replacement.rationale}</p>
                 </div>
+
+                {dependency.risk_change && <RiskChangeDetail rc={dependency.risk_change} />}
 
                 {/* Alternatives considered */}
                 {dependency.replacement.alternatives &&

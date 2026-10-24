@@ -3,6 +3,8 @@
 import React, { useState } from "react";
 import type { Dependency, RiskLevel } from "@/lib/types";
 import { RiskBadge, StrategyChip } from "./Shared";
+import { RiskDelta } from "./RiskReduction";
+import { PriorityChip } from "./PriorityMatrix";
 import { CodeChip } from "./ui/Base";
 import { ChevronRight, Filter, AlertTriangle } from "lucide-react";
 
@@ -17,7 +19,7 @@ export function DependencyTable({
 
   const filtered = dependencies
     .filter((d) => (filterLevel === "all" ? true : d.risk.level === filterLevel))
-    .sort((a, b) => b.risk.score - a.risk.score);
+    .sort((a, b) => (b.priority?.priority ?? b.risk.score) - (a.priority?.priority ?? a.risk.score));
 
   return (
     <div className="bg-white border-[3px] border-[#17151F] rounded-[28px] shadow-[6px_6px_0_0_#17151F] p-6 space-y-4">
@@ -27,7 +29,7 @@ export function DependencyTable({
             Evaluated Dependencies
           </h3>
           <p className="text-sm text-[#5A5870]">
-            Ranked by deterministic risk score · Click any row for evidence trail & migration steps
+            Ranked by priority (severity × impact × change cost) · Click any row for evidence trail & migration steps
           </p>
         </div>
 
@@ -57,10 +59,12 @@ export function DependencyTable({
           <thead>
             <tr className="border-b-2 border-[#17151F] text-[#5A5870] font-bold uppercase tracking-wider text-[11px]">
               <th className="py-3 px-3">Dependency</th>
+              <th className="py-3 px-3">Priority</th>
               <th className="py-3 px-3">Version Shift</th>
               <th className="py-3 px-3">Risk Level</th>
               <th className="py-3 px-3">Indicators</th>
               <th className="py-3 px-3">Proposed Action</th>
+              <th className="py-3 px-3">Risk After</th>
               <th className="py-3 px-3 text-center">Applied</th>
               <th className="py-3 px-3 text-center">Gaps</th>
               <th className="py-3 px-2"></th>
@@ -92,6 +96,11 @@ export function DependencyTable({
                         </span>
                       )}
                     </div>
+                  </td>
+
+                  {/* Priority */}
+                  <td className="py-3 px-3">
+                    <PriorityChip p={dep.priority} small />
                   </td>
 
                   {/* Version */}
@@ -150,6 +159,11 @@ export function DependencyTable({
                     ) : (
                       <span className="text-xs text-[#5A5870] italic">None</span>
                     )}
+                  </td>
+
+                  {/* Risk before -> after */}
+                  <td className="py-3 px-3">
+                    <RiskDelta rc={dep.risk_change} />
                   </td>
 
                   {/* Applied */}

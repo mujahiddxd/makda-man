@@ -55,6 +55,15 @@ def import_graph(repo: Path) -> dict[str, set[str]]:
     return graph
 
 
+# Files that start the program: a dependency that reaches one of these is on the main execution path.
+ENTRY_NAMES = {"__main__.py", "main.py", "cli.py", "app.py", "wsgi.py", "asgi.py", "manage.py", "server.py",
+               "index.js", "index.ts", "main.js", "main.ts", "server.js", "server.ts", "app.js", "app.ts", "cli.js"}
+
+
+def is_entry_point(rel: str) -> bool:
+    return rel.rsplit("/", 1)[-1] in ENTRY_NAMES
+
+
 def _conftest_scope(conftest: str, test_files: list[str]) -> list[str]:
     base = conftest.rsplit("/", 1)[0] + "/" if "/" in conftest else ""
     return [t for t in test_files if t.startswith(base) and t != conftest]
@@ -71,6 +80,7 @@ def compute(repo: Path, usage: dict[str, dict], graph: dict[str, set[str]] | Non
         for d in dsts:
             reverse.setdefault(d, set()).add(src)
     test_files = sorted(f for f in graph if is_test(f) and not f.endswith("conftest.py"))
+    total_modules = sum(1 for f in graph if not is_test(f))
     out: dict[str, dict] = {}
     for dep, u in usage.items():
         locs = u.get("locations", [])
@@ -119,9 +129,10 @@ def compute(repo: Path, usage: dict[str, dict], graph: dict[str, set[str]] | Non
             "tests": [{"file": f, "via": via[f]} for f in tests],
             "nodes": nodes,
             "edges": edges,
+            "entry_points": sorted(f for f in via if is_entry_point(f) and not is_test(f)),
             "stats": {"direct_files": len(direct), "lines": sum(len(v) for v in direct.values()),
                       "indirect_files": len(indirect), "test_files": len(tests),
-                      "total_test_files": len(test_files)},
+                      "total_test_files": len(test_files), "total_modules": total_modules},
             "provenance": "evidence",
         }
     return out

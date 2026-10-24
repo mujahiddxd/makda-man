@@ -15,7 +15,15 @@ function cfg() {
 }
 
 async function api(path, asText = false, init = {}) {
-  const res = await fetch(cfg().api + path, init);
+  let res;
+  try {
+    res = await fetch(cfg().api + path, init);
+  } catch (e) {
+    const err = new Error(`cannot reach the DepExit API at ${cfg().api} (${(e.cause && e.cause.code) || e.message}). ` +
+      "Start it with run.ps1 (or `make dev`), or fix the depexit.apiUrl setting.");
+    err.unreachable = true;
+    throw err;
+  }
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
     try { msg = (await res.json()).error.message; } catch { /* plain text */ }
@@ -31,12 +39,43 @@ function workspaceRoot() {
   return f && f.length ? f[0].uri : null;
 }
 
+// Accepts https://github.com/o/r, github.com/o/r, git@github.com:o/r.git, .../tree/<branch>, trailing .git or "/".
+// Returns { url, ref } (ref "" = default branch) or null.
+function parseRepo(input) {
+  let s = String(input || "").trim().replace(/^git\+/, "");
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s)) s = `github.com/${s}`; // owner/repo shorthand
+  const m = s.match(/^(?:(?:https?|ssh):\/\/)?(?:[^@/]+@)?(?:www\.)?github\.com[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:\/(?:tree|commits?)\/([^?#]+?))?\/?(?:[?#].*)?$/i);
+  if (!m) return null;
+  return { url: `https://github.com/${m[1]}/${m[2]}`, ref: m[3] ? decodeURIComponent(m[3]) : "" };
+}
+
 function gitRemote(root) {
   try {
-    const url = cp.execSync("git config --get remote.origin.url", { cwd: root.fsPath }).toString().trim();
-    const m = url.match(/github\.com[:/]([^/]+)\/(.+?)(\.git)?$/);
-    return m ? `https://github.com/${m[1]}/${m[2]}` : "";
+    const url = cp.execSync("git config --get remote.origin.url", { cwd: root.fsPath, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    const r = parseRepo(url);
+    return r ? r.url : "";
   } catch { return ""; }
+}
+
+const sameRepo = (a, b) => !!a && !!b && a.toLowerCase().replace(/\/$/, "") === b.toLowerCase().replace(/\/$/, "");
+
+// Run git without a shell; resolves with stdout, rejects with git's own error text.
+function git(args, cwd, token) {
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = cp.spawn("git", args, { cwd, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+    } catch (e) {
+      reject(new Error(`git is not available (${e.message}). Install Git and make sure it is on PATH.`));
+      return;
+    }
+    let out = "", err = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { err += d; output.append(String(d)); });
+    child.on("error", (e) => reject(new Error(e.code === "ENOENT" ? "git is not installed or not on PATH" : e.message)));
+    child.on("close", (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`git ${args[0]} failed: ${err.trim().split("\n").pop() || `exit ${code}`}`))));
+    if (token) token.onCancellationRequested(() => child.kill());
+  });
 }
 
 const severityOf = (level) =>
@@ -115,11 +154,48 @@ function hoverFor(d) {
   return md;
 }
 
+// Why a job failed, in words: the job error, else the failed stages with their errors.
+function failureReason(job) {
+  const failed = (job.stages || []).filter((s) => s.status === "failed");
+  const parts = failed.map((s) => `${s.label}: ${(s.error || "failed").replace(/\s+/g, " ").slice(0, 300)}`);
+  let msg = (job.error || parts.join(" | ") || "the analysis failed without an error message (see the backend log)").replace(/[.\s]+$/, "");
+  if (/server restarted/i.test(msg)) msg += ". The DepExit API was restarted during the run; start the analysis again";
+  else if (/AI service|:8001/i.test(msg)) msg += ". Is the AI service running (run.ps1 starts it on :8001)?";
+  else if (/clone/i.test(msg) && /not found|could not read|repository/i.test(msg)) msg += ". Check that the repository exists and is public";
+  return /[.?]$/.test(msg) ? msg : msg + ".";
+}
+
+async function preflight() {
+  const h = await api("/api/health");
+  const problems = [];
+  if (h.ai_service === false) problems.push("the AI service is not running (AI stages will fail)");
+  if (h.docker === false) problems.push("Docker is not running (tests cannot run in the sandbox)");
+  if (!problems.length) return true;
+  const pick = await vscode.window.showWarningMessage(`DepExit: ${problems.join("; ")}.`, { modal: true }, "Analyse anyway");
+  return pick === "Analyse anyway";
+}
+
 async function loadAnalysis(id) {
-  const capsule = await api(`/api/analyses/${id}/capsule`);
+  let capsule;
+  try {
+    capsule = await api(`/api/analyses/${id}/capsule`);
+  } catch (e) {
+    if (e.status !== 404) throw e;
+    const job = await api(`/api/analyses/${id}`).catch(() => null);
+    if (!job) throw new Error(`analysis ${id} does not exist on ${cfg().api}`);
+    if (job.status === "failed") throw new Error(`analysis ${id} failed: ${failureReason(job)}`);
+    throw new Error(`analysis ${id} is still ${job.status}; try again when it has finished`);
+  }
   state = { ...state, id, capsule };
   const n = render(capsule);
   output.appendLine(`Loaded capsule ${id}: ${n} at-risk dependencies shown.`);
+  const repoUrl = capsule.target && capsule.target.repo_url;
+  const root = workspaceRoot();
+  if (repoUrl && !(root && sameRepo(gitRemote(root), repoUrl))) {
+    vscode.window.showWarningMessage(
+      `DepExit: the open folder is not ${repoUrl}, so the warnings cannot point at its files. Clone it to see them in the code.`,
+      "Clone & Open").then((pick) => { if (pick) vscode.commands.executeCommand("depexit.clone", id); });
+  }
   vscode.window.showInformationMessage(`DepExit: ${capsule.summary.headline}`, "Open Capsule", "Open Patch").then((pick) => {
     if (pick === "Open Capsule") vscode.commands.executeCommand("depexit.openCapsule");
     if (pick === "Open Patch") vscode.commands.executeCommand("depexit.openPatch");
@@ -128,31 +204,126 @@ async function loadAnalysis(id) {
 
 async function analyze() {
   const root = workspaceRoot();
-  const repo = await vscode.window.showInputBox({
-    prompt: "GitHub repository to analyse (DepExit clones it and runs the tests in Docker)",
+  const input = await vscode.window.showInputBox({
+    prompt: "GitHub repository to analyse: DepExit clones it on the server, scans it and runs its tests in Docker",
+    placeHolder: "https://github.com/owner/repo  (github.com/owner/repo, git@github.com:owner/repo.git and /tree/<branch> work too)",
     value: (root && gitRemote(root)) || "https://github.com/rishrek/LinkWatch",
+    validateInput: (v) => (parseRepo(v) ? null : "Enter a GitHub repository, e.g. https://github.com/owner/repo"),
   });
-  if (!repo) return;
+  if (!input) return;
+  const repo = parseRepo(input);
+  if (!(await preflight())) return;
   const created = await api("/api/analyses", false, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo_url: repo }),
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo_url: repo.url, ...(repo.ref ? { ref: repo.ref } : {}) }),
   });
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "DepExit", cancellable: true },
+  output.appendLine(`Started analysis ${created.id} of ${repo.url}${repo.ref ? ` @ ${repo.ref}` : ""}`);
+  const job = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `DepExit: ${repo.url.replace("https://github.com/", "")}`, cancellable: true },
     async (progress, token) => {
       let last = "";
       for (; ;) {
-        if (token.isCancellationRequested) return;
-        const job = await api(`/api/analyses/${created.id}`);
-        const running = job.stages.filter((s) => s.status === "running").map((s) => s.label).join(" · ");
-        if (running && running !== last) { progress.report({ message: running }); last = running; }
-        if (["completed", "completed_with_errors", "failed"].includes(job.status)) {
-          if (job.status === "failed") throw new Error(job.error || "analysis failed");
-          await loadAnalysis(created.id);
-          return;
+        if (token.isCancellationRequested) {
+          vscode.window.showInformationMessage(`DepExit: stopped watching ${created.id}; it keeps running. Load it later with "DepExit: Load Analysis by ID".`);
+          return null;
         }
+        const j = await api(`/api/analyses/${created.id}`);
+        const running = j.stages.filter((s) => s.status === "running").map((s) => s.label).join(" · ");
+        if (running && running !== last) { progress.report({ message: running }); last = running; }
+        if (["completed", "completed_with_errors", "failed"].includes(j.status)) return j;
         await new Promise((r) => setTimeout(r, 2000));
       }
     });
+  if (!job) return;
+  if (job.status === "failed") {
+    output.appendLine(`Analysis ${created.id} failed: ${failureReason(job)}`);
+    output.show(true);
+    throw new Error(`analysis failed: ${failureReason(job)}`);
+  }
+  if (job.status === "completed_with_errors") {
+    vscode.window.showWarningMessage(`DepExit: finished with errors: ${failureReason(job)}`);
+  }
+  if (root && sameRepo(gitRemote(root), repo.url)) {
+    await loadAnalysis(created.id); // the open folder is the analysed repo: show the results here
+    return;
+  }
+  const pick = await vscode.window.showInformationMessage(
+    `DepExit: analysis of ${repo.url} is ready. Clone the repository at the analysed commit to see the results in its code?`,
+    "Clone & Open", "Just load results");
+  if (pick === "Clone & Open") await cloneAndOpen(created.id);
+  else if (pick) await loadAnalysis(created.id);
+}
+
+// ---- Clone the analysed repository locally (exact analysed commit) and open it with the results ----
+const PENDING_KEY = "depexit.pendingLoads"; // folder path -> analysis id, picked up when that folder opens
+let extContext;
+
+async function cloneAndOpen(id) {
+  if (!id) id = state.id;
+  if (!id) throw new Error("load an analysis first (DepExit: Load Analysis by ID)");
+  const job = await api(`/api/analyses/${id}`);
+  const repo = parseRepo(job.repo_url);
+  if (!repo) throw new Error(`${job.repo_url} is not a GitHub repository`);
+  const name = repo.url.split("/").pop();
+  const parent = await vscode.window.showOpenDialog({
+    canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
+    openLabel: `Clone ${name} here`, title: `DepExit: choose where to clone ${repo.url}`,
+  });
+  if (!parent || !parent.length) return;
+  let target = vscode.Uri.joinPath(parent[0], name);
+  const exists = await vscode.workspace.fs.stat(target).then(() => true, () => false);
+  if (exists) {
+    if (sameRepo(gitRemote(target), repo.url)) {
+      const reuse = await vscode.window.showInformationMessage(`${target.fsPath} is already a clone of ${repo.url}.`, { modal: true }, "Use it");
+      if (reuse !== "Use it") return;
+    } else {
+      target = vscode.Uri.joinPath(parent[0], `${name}-${id}`);
+      if (await vscode.workspace.fs.stat(target).then(() => true, () => false)) throw new Error(`${target.fsPath} already exists`);
+    }
+  }
+  const fresh = !exists || !sameRepo(gitRemote(target), repo.url);
+  const branch = `depexit/${id}`;
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `DepExit: cloning ${repo.url}`, cancellable: true },
+    async (progress, token) => {
+      if (fresh) {
+        progress.report({ message: "git clone…" });
+        await git(["clone", "--no-tags", repo.url, target.fsPath], parent[0].fsPath, token);
+      } else {
+        progress.report({ message: "git fetch…" });
+        await git(["fetch", "--no-tags", "origin"], target.fsPath, token);
+      }
+      if (job.commit) {
+        progress.report({ message: `checking out the analysed commit ${job.commit.slice(0, 10)}…` });
+        try {
+          await git(["checkout", "-B", branch, job.commit], target.fsPath, token);
+        } catch (e) { // the commit can be missing from a fork/branch that moved: fetch it explicitly
+          await git(["fetch", "origin", job.commit], target.fsPath, token);
+          await git(["checkout", "-B", branch, job.commit], target.fsPath, token);
+        }
+      }
+    });
+  output.appendLine(`Cloned ${repo.url} to ${target.fsPath}${job.commit ? ` at ${job.commit.slice(0, 10)} (branch ${branch})` : ""}`);
+  const pending = extContext.globalState.get(PENDING_KEY, {});
+  pending[target.fsPath.toLowerCase()] = id;
+  await extContext.globalState.update(PENDING_KEY, pending);
+  const where = await vscode.window.showInformationMessage(
+    `DepExit: cloned to ${target.fsPath}. Open it to see the results in the code.`, "Open Here", "Open in New Window");
+  if (!where) return;
+  await vscode.commands.executeCommand("vscode.openFolder", target, { forceNewWindow: where === "Open in New Window" });
+}
+
+// When a folder opens that DepExit just cloned, load its analysis automatically.
+async function loadPending() {
+  const root = workspaceRoot();
+  if (!root || !extContext) return;
+  const pending = extContext.globalState.get(PENDING_KEY, {});
+  const key = root.fsPath.toLowerCase();
+  const id = pending[key];
+  if (!id) return;
+  delete pending[key];
+  await extContext.globalState.update(PENDING_KEY, pending);
+  await loadAnalysis(id);
 }
 
 async function openText(path, language) {
@@ -263,6 +434,7 @@ async function acceptToken(context, token) {
 }
 
 function activate(context) {
+  extContext = context;
   diagnostics = vscode.languages.createDiagnosticCollection("depexit");
   output = vscode.window.createOutputChannel("DepExit");
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
@@ -286,11 +458,22 @@ function activate(context) {
       }),
     }),
     vscode.commands.registerCommand("depexit.analyze", wrap(analyze)),
+    vscode.commands.registerCommand("depexit.clone", wrap(cloneAndOpen)),
     vscode.commands.registerCommand("depexit.load", wrap(async () => {
       let items = [];
-      try { items = (await api("/api/analyses")).items.filter((i) => i.status !== "failed"); } catch { /* API down */ }
+      try {
+        items = (await api("/api/analyses")).items
+          .filter((i) => i.status === "completed" || i.status === "completed_with_errors")
+          .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+      } catch (e) {
+        if (e.unreachable) throw e;
+      }
       const pick = items.length
-        ? await vscode.window.showQuickPick(items.map((i) => ({ label: i.id, description: `${i.repo_url} · ${i.status}` })))
+        ? await vscode.window.showQuickPick(items.map((i) => ({
+          label: i.id, description: i.repo_url,
+          detail: `${i.status.replace(/_/g, " ")} · ${new Date(i.created_at).toLocaleString()}` +
+            (i.summary ? ` · ${i.summary.at_risk} of ${i.summary.dependencies_total} at risk` : ""),
+        })), { title: "DepExit: finished analyses" })
         : { label: await vscode.window.showInputBox({ prompt: "Analysis ID (dx_...)" }) };
       if (pick && pick.label) await loadAnalysis(pick.label);
     })),
@@ -316,8 +499,9 @@ function activate(context) {
       },
     }),
   );
+  wrap(loadPending)();
 }
 
 function deactivate() { }
 
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, _test: { parseRepo, failureReason, sameRepo } };

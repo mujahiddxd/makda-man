@@ -140,6 +140,31 @@ def build(capsule: dict, out: Path) -> Path:
     gaps = "n/a" if scan_only else f"{s['gaps']['fixed']} / {s['gaps']['regressed']} / {s['gaps']['still_failing']}"
     pdf.grid(["Dependencies", "At risk", "Tests: original deps", "Tests: migrated", "Gaps fixed / regressed / failing"],
               [[s["dependencies_total"], s["at_risk"], tests_b, tests_m, gaps]], [24, 18, 40, 40, 58])
+    rr = s.get("risk_reduction")
+    if rr:
+        pdf.h3("Risk before -> after (same scoring as the scan)")
+        pdf.grid(["Total risk", "At-risk deps", "Highest single risk", "Eliminated / reduced / unchanged / increased"],
+                  [[f"{rr['total_before']} -> {rr['total_after']} ({rr['reduced_pct']}% lower)",
+                    f"{rr['at_risk_before']} -> {rr['at_risk_after']}", f"{rr['max_before']} -> {rr['max_after']}",
+                    f"{rr['eliminated']} / {rr['reduced']} / {rr['unchanged']} / {rr['increased']}"]], [44, 30, 36, 70])
+
+    tr = c.get("transitive")
+    if tr and tr.get("available") and tr.get("items"):
+        pdf.h2(f"Transitive vulnerabilities ({tr['vulnerable']} of {tr['total']} pulled-in packages)")
+        pdf.bullets([f"{i['name']} {i['version']}{' (dev)' if i['dev'] else ''}: " + " -> ".join(i["paths"][0])
+                     + " | " + ", ".join(f"{v['id']} {v['severity']}" for v in i["vulnerabilities"][:4])
+                     for i in tr["items"][:40]], size=8)
+
+    pr = s.get("priority")
+    if pr and pr["order"]:
+        lab = {"fix_first": "Fix first", "plan": "Plan", "monitor": "Monitor", "ok": "OK"}
+        by = {d["name"]: d for d in c["dependencies"]}
+        pdf.h2("Priorities (severity x impact x change cost)")
+        pdf.grid(["#", "Dependency", "Label", "Sev.", "Impact", "Cost", "Recommendation"],
+                  [[n, name, lab[by[name]["priority"]["label"]], by[name]["priority"]["severity"],
+                    by[name]["priority"]["impact"]["score"], by[name]["priority"]["change_cost"]["score"],
+                    by[name]["priority"]["recommendation"]] for n, name in enumerate(pr["order"], 1)],
+                  [8, 30, 18, 12, 14, 12, 86], size=7)
 
     # dependency overview
     pdf.h2("Dependencies")
@@ -149,10 +174,13 @@ def build(capsule: dict, out: Path) -> Path:
         m = d.get("migration") or {}
         pin = d.get("pinned_version") or ("undeclared" if not d["declared"] else "unpinned")
         applied = "proposed" if m.get("proposed_only") else ("yes" if m.get("applied") else ("no" if m else "-"))
+        rc = d.get("risk_change")
         rows.append([d["name"], f"{pin} -> {d.get('latest_version') or '?'}", f"{d['risk']['level']} ({d['risk']['score']})",
-                     f"{r.get('strategy', '-')} {r.get('package') or ''} {r.get('version_spec') or ''}".strip(), applied])
-        fills.append([None, None, LEVEL_RGB.get(d["risk"]["level"]), None, None])
-    pdf.grid(["Dependency", "Version", "Risk", "Proposal", "Applied"], rows, [40, 36, 24, 62, 18], fills)
+                     f"{r.get('strategy', '-')} {r.get('package') or ''} {r.get('version_spec') or ''}".strip(),
+                     f"{rc['after']['level']} ({rc['after']['score']})" if rc else "-", applied])
+        fills.append([None, None, LEVEL_RGB.get(d["risk"]["level"]), None,
+                      LEVEL_RGB.get(rc["after"]["level"]) if rc else None, None])
+    pdf.grid(["Dependency", "Version", "Risk", "Proposal", "Risk after", "Applied"], rows, [36, 32, 22, 52, 22, 16], fills)
 
     # per at-risk dependency
     for d in c["dependencies"]:
@@ -169,6 +197,15 @@ def build(capsule: dict, out: Path) -> Path:
         pdf.bullets([f"{i['code']} ({i['severity']}): {i['detail']} - evidence: "
                      + ", ".join(e.get("ref") or e.get("url") or e.get("detail") or e["source"] for e in i["evidence"][:3])
                      for i in d["risk"]["indicators"]], size=8)
+        rc = d.get("risk_change")
+        if rc:
+            pdf.h3("Risk before -> after [computed]")
+            pdf.para(rc["explanation"])
+            pdf.bullets([f"fixed {x['code']} (-{x['points']}): {x['detail']}" for x in rc["resolved"]]
+                        + [f"still present {x['code']} ({x['points']}): {x['detail']}" for x in rc["remaining"]]
+                        + [f"new {x['code']} (+{x['points']}): {x['detail']}" for x in rc["introduced"]], size=8)
+            if rc["why_chosen"]:
+                pdf.para("Why this choice: " + "; ".join(rc["why_chosen"]) + ".", size=8, color=MUTED)
         pdf.h3("Usage locations")
         locs = d["usage"]["locations"]
         pdf.bullets([f"{l['file']}:{l['line']} [{l['kind']}] {l['code']}" for l in locs[:15]] or ["not imported anywhere"],

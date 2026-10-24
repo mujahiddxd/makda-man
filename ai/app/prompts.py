@@ -89,6 +89,13 @@ def decide(py: str, dep: dict, usage: list[str], candidates: list[dict], others:
         "manifests), keep.\n"
         "Rules:\n"
         "- Prefer the smallest change that removes the risk; prefer stdlib when it fully covers the APIs used.\n"
+        "- The result should be LESS risky than today: each candidate has a risk_score (0-100, scored exactly like the "
+        "dependency's own risk_score). Prefer the candidate with the lowest risk_score that still covers every usage, "
+        "and say in the rationale which risk indicators your choice removes and why it beats the alternatives.\n"
+        "- Weigh the size of the change against the risk: facts.impact (0-100) says how far this dependency reaches "
+        "into the project. For a low risk_score (<45) with many usage locations, prefer the smallest safe change "
+        "(upgrade/declare, or keep with a concern) over rewriting code. For high impact, prefer a replacement with the "
+        "same API so behaviour stays the same, and list the riskiest call sites in open_concerns.\n"
         "- The plan must cover EVERY usage location listed. If code must change, set code_changes_needed=true.\n"
         + eco["spec"] +
         "- steps: ordered, concrete, mention file paths.\n"

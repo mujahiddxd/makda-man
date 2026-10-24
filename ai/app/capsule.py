@@ -8,7 +8,7 @@ from pathlib import Path
 
 import jsonschema
 
-from . import config, gemma, risk, state
+from . import config, gemma, priority, projection, risk, state
 from .models import Capsule
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "capsule.schema.json"
@@ -92,14 +92,23 @@ def run(job_dir: Path, target: dict, stage_errors: dict, base_url: str) -> dict:
 
     ecosystem = scan.get("ecosystem", "python")
     scan_only = ecosystem != "python"
+    trans = scan.get("transitive")
+    trans_items = (trans or {}).get("items", [])
     out_deps = []
+    changes = []
+    priorities = []
     for d in deps:
+        p = proposals.get(d["name"])
+        # before -> after risk of the proposed change (needs the projection stored by the propose stage)
+        rc = None
+        if p and (p["strategy"] in ("keep", "remove", "stdlib") or "projection" in p):
+            rc = projection.compare(d["name"], d["risk"]["indicators"], p, ecosystem, target.get("python_version"))
+            changes.append(rc)
         for ind in d["risk"]["indicators"]:
             for e in ind["evidence"]:
                 e["url"] = _prefix(base_url, e.get("url"))
             ind.pop("count", None)
             ind.pop("majors", None)
-        p = proposals.get(d["name"])
         a = (mat.get("applied") or {}).get(d["name"])
         dep_gaps = [g for g in gaps if d["name"] in g.get("dependencies", [])]
         test_files = set(d["usage"]["files"])
@@ -121,6 +130,14 @@ def run(job_dir: Path, target: dict, stage_errors: dict, base_url: str) -> dict:
                 d["risk"]["rationale"], d["risk"]["rationale_provenance"] = p["risk_summary"], "ai"
             if p.get("usage_summary") and d["usage"]["locations"]:
                 d["usage"]["summary"], d["usage"]["summary_provenance"] = p["usage_summary"], "ai"
+        # severity x impact x change cost (blast radius and sandbox evidence feed the impact)
+        regressed = any(g["change"] in ("regressed", "install_regressed") for g in dep_gaps)
+        imp = priority.impact(d.get("blast_radius"), d["usage"], d.get("group") or "main", regressed)
+        cost = priority.change_cost((p or {}).get("strategy", "keep"), d["usage"],
+                                    {i["code"] for i in d["risk"]["indicators"]}, (a or {}).get("files_changed"),
+                                    (p or {}).get("code_changes_needed"))
+        prio = priority.assess(d["risk"]["score"], imp, cost, rc["reduction"] if rc else 0)
+        priorities.append((d["name"], prio))
         concerns = [{"text": c, "provenance": p.get("provenance", "ai")} for c in (p or {}).get("open_concerns", [])]
         if a and not a["applied"]:
             concerns.insert(0, {"text": f"Code migration not applied: {a['not_applied_reason']}", "provenance": "derived"})
@@ -130,6 +147,9 @@ def run(job_dir: Path, target: dict, stage_errors: dict, base_url: str) -> dict:
             "risk": d["risk"],
             "usage": d["usage"],
             "blast_radius": d.get("blast_radius"),
+            "risk_change": rc,
+            "priority": prio,
+            "transitive_vulnerabilities": [i for i in trans_items if d["name"] in i.get("via", [])],
             "replacement": None if not p else {
                 "strategy": p["strategy"], "package": p.get("package"), "version_spec": p.get("version_spec"),
                 "rationale": p["rationale"], "confidence": float(p.get("confidence", 0.5)),
@@ -149,6 +169,15 @@ def run(job_dir: Path, target: dict, stage_errors: dict, base_url: str) -> dict:
             "open_concerns": concerns,
         }
         out_deps.append(entry)
+
+    if not scan_only:
+        try:  # stack of small PRs offered by the PR dialog; never fail the capsule because of it
+            from . import split
+            split.plan(job_dir, deps, proposals, mat, scan.get("install_files") or [], dict(priorities),
+                       {e["name"]: (e["risk_change"] or {}).get("reduction", 0) for e in out_deps})
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger("depexit.capsule").warning("PR split plan failed: %s", e)
 
     def tot(rid: str) -> dict:
         r = next((x for x in runs if x["id"] == rid), None)
@@ -180,6 +209,14 @@ def run(job_dir: Path, target: dict, stage_errors: dict, base_url: str) -> dict:
     if scan_only:
         headline = (f"Scan-only ({ecosystem}): {at_risk} of {len(out_deps)} dependencies are at risk. Replacements are "
                     "proposed by AI but not migrated or verified in a sandbox.")
+    reduction = projection.summarize(changes) if changes else None
+    if reduction and reduction["total_before"]:
+        headline += (f" The proposed changes take total dependency risk from {reduction['total_before']} to "
+                     f"{reduction['total_after']} ("
+                     + (f"{reduction['reduced_pct']}% lower" if reduction["reduced_by"] > 0 else
+                        f"{-reduction['reduced_pct']}% higher" if reduction["reduced_by"] < 0 else "no change")
+                     + "); at-risk dependencies "
+                     f"{reduction['at_risk_before']} -> {reduction['at_risk_after']}.")
 
     n_calls, n_failed, model, n_cached, models_used = _calls(job_dir)
     fallback_answers = {m: n for m, n in models_used.items() if not m.startswith("gemma")}
@@ -213,6 +250,7 @@ def run(job_dir: Path, target: dict, stage_errors: dict, base_url: str) -> dict:
                               "executed in the Docker sandbox for this ecosystem yet.")
     elif not any(r["tests"] for r in runs):
         limitations.append("No test results were collected; compatibility could not be verified by execution.")
+    limitations += [f"Transitive dependencies: {n}" for n in (trans or {}).get("notes", [])]
     limitations += [n for n in scan.get("notes", []) if "not parsed" in n or "not analysed" in n
                     or "lookup failed" in n or "No lockfile" in n]
     limitations += [text for text, sandboxed in FIXED_LIMITATIONS if sandboxed is None or sandboxed == (not scan_only)]
@@ -231,9 +269,14 @@ def run(job_dir: Path, target: dict, stage_errors: dict, base_url: str) -> dict:
                "models_used": models_used, "fallback_models_used": sorted(fallback_answers),
                "fallback_used": n_failed > 0 or not gemma.configured(), "terms_url": config.GEMMA_TERMS_URL},
         "summary": {"dependencies_total": len(out_deps), "at_risk": at_risk, "by_level": by_level,
-                    "baseline": base, "migrated": mig, "gaps": gap_counts, "verdict": verdict, "headline": headline},
+                    "baseline": base, "migrated": mig, "gaps": gap_counts, "verdict": verdict, "headline": headline,
+                    "risk_reduction": reduction, "priority": priority.summarize(priorities),
+                    "transitive": None if not trans else {
+                        "total": trans.get("total", 0), "vulnerable": trans.get("vulnerable", 0),
+                        "runtime_vulnerable": sum(1 for i in trans_items if not i.get("dev"))}},
         "dependencies": out_deps,
         "runs": runs,
+        "transitive": trans,
         "patch": {"url": f"{base_url}/patch.diff", **(mat.get("patch") or {"files_changed": 0, "insertions": 0, "deletions": 0})},
         "limitations": limitations,
     }
@@ -278,13 +321,37 @@ def render_md(c: dict) -> str:
          "| Dependencies | At risk | Baseline tests | Migrated tests | Gaps fixed / regressed / still failing |",
          "|---|---|---|---|---|",
          f"| {s['dependencies_total']} | {s['at_risk']} | {tests[0]} | {tests[1]} | {gaps_cell} |", ""]
-    L += ["## Dependencies", "", "| Dependency | Pinned → latest | Risk | Proposal | Applied |", "|---|---|---|---|---|"]
+    rr = s.get("risk_reduction")
+    if rr:
+        L += ["## Risk before → after", "",
+              f"Total dependency risk **{rr['total_before']} → {rr['total_after']}** "
+              f"({rr['reduced_by']} points, {rr['reduced_pct']}% lower) · at-risk dependencies "
+              f"{rr['at_risk_before']} → {rr['at_risk_after']} · highest single risk {rr['max_before']} → {rr['max_after']}.",
+              f"Eliminated {rr['eliminated']} · reduced {rr['reduced']} · unchanged {rr['unchanged']} · increased "
+              f"{rr['increased']}. Scored with the same deterministic engine as the scan; each row below shows what changed.", ""]
+    pr = s.get("priority")
+    if pr:
+        lab = {"fix_first": "Fix first", "plan": "Plan", "monitor": "Monitor", "ok": "OK"}
+        by = {d["name"]: d for d in c["dependencies"]}
+        L += ["## Priorities (severity × impact × change cost)", "",
+              " · ".join(f"{lab[k]}: {v}" for k, v in pr["counts"].items()), "",
+              "| # | Dependency | Label | Severity | Impact | Change cost | Recommendation |", "|---|---|---|---|---|---|---|"]
+        for n, name in enumerate(pr["order"], 1):
+            q = by[name]["priority"]
+            L.append(f"| {n} | {name} | {lab[q['label']]} | {q['severity']} | {q['impact']['score']} | "
+                     f"{q['change_cost']['score']} | {q['recommendation']} |")
+        L.append("")
+    L += ["## Dependencies", "", "| Dependency | Pinned → latest | Risk | Proposal | Risk after | Applied |",
+          "|---|---|---|---|---|---|"]
     for d in c["dependencies"]:
         r = d.get("replacement") or {}
         m = d.get("migration") or {}
         prop = f"{r.get('strategy', '-')} {r.get('package') or ''} {r.get('version_spec') or ''}".strip()
+        rc = d.get("risk_change")
+        after = (f"{rc['after']['level']} ({rc['after']['score']}, " + (f"−{rc['reduction']}" if rc["reduction"] > 0 else
+                 f"+{-rc['reduction']}" if rc["reduction"] < 0 else "±0") + ")") if rc else "-"
         L.append(f"| {d['name']} | {d.get('pinned_version') or ('undeclared' if not d['declared'] else 'unpinned')} → "
-                 f"{d.get('latest_version') or '?'} | {d['risk']['level']} ({d['risk']['score']}) | {prop} | "
+                 f"{d.get('latest_version') or '?'} | {d['risk']['level']} ({d['risk']['score']}) | {prop} | {after} | "
                  f"{'proposed' if m.get('proposed_only') else ('✓' if m.get('applied') else ('✗' if m else '-'))} |")
     for d in c["dependencies"]:
         if not risk.at_risk(d["risk"]["level"]) and not d["compatibility_gaps"]:
@@ -313,6 +380,19 @@ def render_md(c: dict) -> str:
               f"(confidence {r.get('confidence')}){_prov(r.get('provenance', ''), r.get('model'))}", "", r.get("rationale", "")]
         for alt in r.get("alternatives", []):
             L.append(f"- Rejected `{alt['package']}`: {alt['reason_rejected']}")
+        q = d.get("priority")
+        if q:
+            L += ["", "### Priority _(computed)_", q["recommendation"],
+                  f"- Impact {q['impact']['score']}: " + "; ".join(q["impact"]["reasons"]),
+                  f"- Change cost {q['change_cost']['score']}: " + "; ".join(q["change_cost"]["reasons"])]
+        rc = d.get("risk_change")
+        if rc:
+            L += ["", "### Risk before → after _(computed)_", rc["explanation"], ""]
+            L += [f"- fixed **{x['code']}** (−{x['points']}): {x['detail']}" for x in rc["resolved"]]
+            L += [f"- still present **{x['code']}** ({x['points']}): {x['detail']}" for x in rc["remaining"]]
+            L += [f"- new **{x['code']}** (+{x['points']}): {x['detail']}" for x in rc["introduced"]]
+            if rc["why_chosen"]:
+                L += ["", "Why this choice: " + "; ".join(rc["why_chosen"]) + "."]
         L += ["", "### Migration steps"] + [f"{n}. {strip_number(st)}" for n, st in enumerate(m.get("steps", []), 1)]
         if m.get("proposed_only"):
             L.append("\nProposed only — not applied (scan-only).")
@@ -329,6 +409,17 @@ def render_md(c: dict) -> str:
         L += [f"- `{g['test_id'] or 'install'}`: {g['baseline']} → {g['migrated']} (**{g['change']}**, {g['severity']}): "
               f"{g['explanation']}{_prov(g['provenance'])}" for g in d["compatibility_gaps"]] or ["- none"]
         L += ["", "### Open concerns"] + ([f"- {x['text']}{_prov(x['provenance'], r.get('model'))}" for x in d["open_concerns"]] or ["- none"])
+    tr = c.get("transitive")
+    if tr:
+        L += ["", "## Transitive vulnerabilities", "",
+              (f"{tr['vulnerable']} of {tr['total']} packages pulled in by your dependencies have known advisories "
+               f"(tree from {tr.get('source')}{', approximate' if tr.get('approximate') else ''}).") if tr.get("available")
+              else "Not checked: " + "; ".join(tr.get("notes", []))]
+        for i in tr.get("items", []):
+            L += ["", f"### {i['name']} {i['version']}" + (" (dev only)" if i["dev"] else "")]
+            L += [f"- path: " + " → ".join(f"`{x}`" for x in p) for p in i["paths"]]
+            L += [f"- [{v['id']}]({v['url']}) {v['severity']}: {v['summary']}"
+                  + (f" — fixed in {', '.join(v['fixed_in'])}" if v["fixed_in"] else "") for v in i["vulnerabilities"]]
     if scan_only:
         L += ["", "## Test runs", "", "Not run: this project was analysed in scan-only mode (no migration, no sandbox)."]
     else:

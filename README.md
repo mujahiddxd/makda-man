@@ -58,7 +58,7 @@ If Gemma is unavailable the pipeline still finishes with deterministic fallbacks
 - **Access:** hosted through the Google AI Studio Gemini API (`generateContent`). API keys go in `GEMINI_API_KEYS`.
 - **Key rotation:** several keys can be listed. A key that hits its quota (HTTP 429) is cooled down and the next one is used. Rejected keys are retired. `.env` is re-read on change, so keys can be added without a restart.
 - **Speed:** each call races both models and the first valid reply wins. Answers are cached by prompt (disclosed in the capsule as `ai.cached_calls`; switch off with `GEMMA_CACHE=0`).
-- **Fallback chain with hard time limits:** every AI call goes to Gemma 4 first with 60% of its time budget (`GEMMA_BUDGET_SHARE`). Only if Gemma fails or runs out of time does it fall back to Gemini (`FALLBACK_MODELS`), then Groq (`GROQ_API_KEYS`), then xAI Grok (`XAI_API_KEYS`). Every answer records the model that produced it (`ai_calls.jsonl`, `replacement.model`, `capsule.ai.models_used`), plus a limitations line whenever a non-Gemma model answered.
+- **Fallback chain with hard time limits:** every AI call goes to Gemma 4 first with 30% of its time budget (`GEMMA_BUDGET_SHARE`). Only if Gemma fails or runs out of time does it fall back to Gemini (`FALLBACK_MODELS`), then Groq (`GROQ_API_KEYS`), then xAI Grok (`XAI_API_KEYS`). Every answer records the model that produced it (`ai_calls.jsonl`, `replacement.model`, `capsule.ai.models_used`), plus a limitations line whenever a non-Gemma model answered.
 - **Terms:** [Gemma Terms of Use](https://ai.google.dev/gemma/terms) and the [Gemini API Additional Terms of Service](https://ai.google.dev/gemini-api/terms).
 
 ## Quick start

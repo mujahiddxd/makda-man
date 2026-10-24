@@ -93,6 +93,90 @@ export interface WorkspaceFilesResponse {
   migrated_available: boolean;
 }
 
+// Risk today vs after the proposed change, scored by the same deterministic engine as the scan.
+export interface RiskItem {
+  code: string;
+  detail: string;
+  points: number;
+}
+
+export interface RiskChange {
+  before: { score: number; level: RiskLevel };
+  after: { score: number; level: RiskLevel; package?: string | null; version?: string | null };
+  reduction: number;                  // before - after; negative when the change raises the risk
+  reduction_pct: number;
+  outcome: "eliminated" | "reduced" | "unchanged" | "increased";
+  resolved: RiskItem[];               // indicators the change removes
+  remaining: RiskItem[];              // indicators still present afterwards
+  introduced: RiskItem[];             // indicators that come with the new package/version
+  after_indicators: Indicator[];
+  why_chosen: string[];               // registry/OSV facts about the chosen package + alternatives' scores
+  alternatives: { package: string; version?: string | null; score?: number | null; level?: RiskLevel | null }[];
+  explanation: string;
+  provenance: "derived";
+}
+
+// severity x impact picks the label; change cost vs benefit marks quick wins and deferrals (derived).
+export type PriorityLabel = "fix_first" | "plan" | "monitor" | "ok";
+
+export interface Priority {
+  label: PriorityLabel;
+  priority: number;                   // sort key: higher = sooner
+  severity: number;                   // = risk score
+  impact: { score: number; level: "high" | "medium" | "low" | "none"; reach_pct: number; reasons: string[] };
+  change_cost: { score: number; level: "high" | "medium" | "low" | "none"; files: number; lines: number; reasons: string[] };
+  quick_win: boolean;
+  deferred: boolean;
+  recommendation: string;
+  provenance: "derived";
+}
+
+export interface PrioritySummary {
+  counts: Record<PriorityLabel, number>;
+  order: string[];                    // dependency names, most urgent first (label "ok" excluded)
+  quick_wins: string[];
+  deferred: string[];
+  thresholds: { severity_high: number; severity_min: number; impact_high: number };
+}
+
+// Packages pulled in by the dependencies (not declared/imported by the project) that have OSV advisories.
+export interface TransitiveItem {
+  name: string;
+  version: string;
+  depth: number;
+  dev: boolean;
+  paths: string[][];                  // ["your app", "express 4.17.1", "qs 6.7.0"]
+  via: string[];                      // direct dependencies that bring it in
+  vulnerabilities: { id: string; summary: string; severity: string; fixed_in: string[]; url: string }[];
+}
+
+export interface Transitive {
+  available: boolean;
+  source?: string | null;
+  approximate: boolean;
+  total: number;
+  vulnerable: number;
+  items: TransitiveItem[];
+  unchecked?: string[];
+  notes: string[];
+}
+
+export interface RiskReduction {
+  total_before: number;
+  total_after: number;
+  reduced_by: number;
+  reduced_pct: number;
+  at_risk_before: number;
+  at_risk_after: number;
+  max_before: number;
+  max_after: number;
+  by_level_after: Record<RiskLevel, number>;
+  eliminated: number;
+  reduced: number;
+  unchanged: number;
+  increased: number;
+}
+
 export interface Dependency {
   name: string;                       // normalized (PEP 503)
   import_names: string[];             // e.g. ["jinja2"]
@@ -117,6 +201,9 @@ export interface Dependency {
     summary_provenance: "ai" | "derived";
   };
   blast_radius?: BlastRadius | null;
+  risk_change?: RiskChange | null;
+  priority?: Priority | null;
+  transitive_vulnerabilities?: TransitiveItem[];
   replacement?: {
     strategy: Strategy;
     package?: string;
@@ -196,6 +283,9 @@ export interface CapsuleSummary {
   gaps: { fixed: number; regressed: number; still_failing: number };
   verdict: "safe_to_migrate" | "migrate_with_care" | "blocked";   // derived
   headline: string;                   // one sentence, ai or derived
+  risk_reduction?: RiskReduction | null;
+  priority?: PrioritySummary | null;
+  transitive?: { total: number; vulnerable: number; runtime_vulnerable: number } | null;
 }
 
 export interface Capsule {
@@ -223,6 +313,7 @@ export interface Capsule {
   summary: CapsuleSummary;
   dependencies: Dependency[];         // ALL declared + undeclared deps; sorted by risk score desc
   runs: Run[];
+  transitive?: Transitive | null;
   patch: { url: string; files_changed: number; insertions: number; deletions: number };
   limitations: string[];              // honest list, always non-empty
 }

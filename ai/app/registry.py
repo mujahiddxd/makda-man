@@ -82,6 +82,37 @@ async def osv_query(name: str, version: str, ecosystem: str = "PyPI") -> list[di
     return None if d is None else d["vulns"]
 
 
+async def osv_batch(pkgs: list[tuple[str, str]], ecosystem: str = "PyPI") -> dict[tuple[str, str], list[str]] | None:
+    """Advisory ids for many (name, version) pairs in few requests (OSV querybatch). Cached per pair and day.
+    Returns None when OSV could not be reached; details for hits come from osv_query()."""
+    out: dict[tuple[str, str], list[str]] = {}
+    todo = []
+    for name, version in dict.fromkeys(pkgs):
+        path = _cache_path("osvids", f"{ecosystem}:{name}=={version}")
+        if path.exists():
+            out[(name, version)] = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            todo.append((name, version))
+    url = config.OSV_URL.rsplit("/", 1)[0] + "/querybatch"
+    for i in range(0, len(todo), 500):
+        chunk = todo[i:i + 500]
+        try:
+            async with _sem:
+                r = await client().post(url, json={"queries": [
+                    {"package": {"name": n, "ecosystem": ecosystem}, "version": v} for n, v in chunk]})
+        except httpx.HTTPError as e:
+            log.warning("osv batch: %s", e)
+            return None
+        if r.status_code != 200:
+            log.warning("osv batch: HTTP %s", r.status_code)
+            return None
+        for (n, v), res in zip(chunk, r.json().get("results", [])):
+            ids = [x.get("id") for x in (res or {}).get("vulns", []) if x.get("id")]
+            out[(n, v)] = ids
+            _cache_path("osvids", f"{ecosystem}:{n}=={v}").write_text(json.dumps(ids), encoding="utf-8")
+    return out
+
+
 def release_date(project: dict, version: str) -> str | None:
     files = (project.get("releases") or {}).get(version) or []
     times = sorted(f.get("upload_time_iso_8601") or f.get("upload_time") for f in files if f.get("upload_time"))
