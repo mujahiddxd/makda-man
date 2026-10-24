@@ -6,7 +6,15 @@ Brings the DepExit **Dependency Exit Capsule** into the editor:
   and monkeypatching are called out.
 - **Hover:** risk indicators, the Gemma 4 rationale and proposal, migration steps and the test gaps measured in Docker.
 - **Quick fix:** "replace file with its migrated version". Opens a diff against the version that was tested in the
-  sandbox, then applies it only after you confirm.
+  sandbox, then applies and saves it only after you confirm.
+- **Apply all at once:** **DepExit: Apply All Migrations** (or the quick fix "apply migration to ALL files") applies
+  every changed file in one step and saves them. Safety checks first:
+  - the open folder must be the analysed repository (another repo is refused);
+  - each file must still match the version DepExit analysed. Files you changed since are unticked and marked, and
+    are only overwritten if you tick them on purpose (single-file apply asks "Discard My Changes and Apply");
+  - an unverified migration (install failed, tests failed, verdict blocked) needs an explicit "Apply Anyway";
+  - missing files are skipped and reported, already-applied files are left alone, and line endings are kept.
+  Undo with git (`git checkout -- .`, `git clean` for new files).
 - **Status bar:** the at-risk count and verdict. Click it to open `CAPSULE.md` as a Markdown preview.
 
 ## Use

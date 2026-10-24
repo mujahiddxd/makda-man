@@ -350,63 +350,178 @@ class QuickFix {
   }
 }
 
-async function applyFile(uri, rel) {
-  let text;
+// ---- Applying the migration to the open workspace ----
+// Every file is checked before it is touched: the local copy must still match the version DepExit analysed,
+// otherwise it holds edits (or another commit) that a blind overwrite would destroy.
+const eolFree = (s) => String(s).replace(/\r\n/g, "\n");
+const encPath = (rel) => rel.split("/").map(encodeURIComponent).join("/");
+
+async function localText(uri) {
+  const open = vscode.workspace.textDocuments && vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+  if (open) return open.getText(); // includes unsaved edits
   try {
-    text = await api(`/api/analyses/${state.id}/migrated/${rel}`, true);
-  } catch (e) {
-    vscode.window.showWarningMessage(`DepExit: no migrated version of ${rel} (${e.message}).`);
-    return;
+    return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
+  } catch { return null; } // missing
+}
+
+// Refuse to write another repository's migration into this folder.
+async function guardWorkspace() {
+  if (!state.id || !state.capsule) throw new Error("load an analysis first (DepExit: Load Analysis by ID)");
+  const root = workspaceRoot();
+  if (!root) throw new Error("open the analysed repository as a workspace folder first (or use DepExit: Clone Analysed Repository & Open)");
+  const want = state.capsule.target && state.capsule.target.repo_url;
+  const have = gitRemote(root);
+  if (want && have && !sameRepo(have, want)) {
+    throw new Error(`this folder is ${have}, but the analysis is of ${want}. Use "DepExit: Clone Analysed Repository & Open" to get the right code`);
   }
-  const doc = await vscode.workspace.openTextDocument(uri);
-  if (doc.getText() === text) {
-    vscode.window.showInformationMessage(`DepExit: ${rel} needs no change.`);
-    return;
+  if (want && !have) {
+    const go = await vscode.window.showWarningMessage(
+      `DepExit: this folder has no GitHub remote, so it cannot be confirmed to be ${want}. Every file is still checked against the analysed version before it changes.`,
+      { modal: true }, "Continue");
+    if (go !== "Continue") return null;
   }
-  const migrated = await vscode.workspace.openTextDocument({ content: text, language: doc.languageId });
-  await vscode.commands.executeCommand("vscode.diff", uri, migrated.uri, `${rel} ↔ DepExit migrated`);
-  const ok = await vscode.window.showWarningMessage(`Apply DepExit's migrated version of ${rel}?`, { modal: true }, "Apply");
-  if (ok !== "Apply") return;
+  return root;
+}
+
+// The sandbox result decides how loudly we warn: an unverified migration must never look safe.
+async function confirmVerification(count) {
+  const s = state.capsule.summary || {};
+  const m = s.migrated || {};
+  const verified = m.status === "passed" && s.verdict !== "blocked";
+  if (verified) return true;
+  const why = m.status === "install_failed" ? "the migrated project did not install in the sandbox"
+    : m.status === "tests_failed" ? `tests failed after the migration (${m.passed}/${m.total} passed; ${(s.baseline || {}).passed}/${(s.baseline || {}).total} before)`
+      : m.status ? `the sandbox run ended with "${m.status}"` : "it was not run in the sandbox";
+  const go = await vscode.window.showWarningMessage(
+    `DepExit: this migration is NOT verified: ${why}${s.verdict === "blocked" ? " and the verdict is BLOCKED" : ""}. Apply ${count} file(s) anyway?`,
+    { modal: true }, "Apply Anyway");
+  return go === "Apply Anyway";
+}
+
+// Classify every changed file: ready | already | conflict | missing.
+async function planFiles(root, only) {
+  const listing = await api(`/api/analyses/${state.id}/files`);
+  const changed = listing.files.filter((f) => ["modified", "added", "removed"].includes(f.status) && (!only || f.path === only));
+  return Promise.all(changed.map(async (f) => {
+    const uri = vscode.Uri.joinPath(root, ...f.path.split("/"));
+    const [orig, mig, local] = await Promise.all([
+      f.status === "added" ? null : api(`/api/analyses/${state.id}/original/${encPath(f.path)}`, true),
+      f.status === "removed" ? null : api(`/api/analyses/${state.id}/migrated/${encPath(f.path)}`, true),
+      localText(uri),
+    ]);
+    let kind;
+    if (f.status === "removed") kind = local === null ? "already" : eolFree(local) === eolFree(orig) ? "ready" : "conflict";
+    else if (local !== null && eolFree(local) === eolFree(mig)) kind = "already";
+    else if (f.status === "added") kind = local === null ? "ready" : "conflict";
+    else if (local === null) kind = "missing";
+    else kind = eolFree(local) === eolFree(orig) ? "ready" : "conflict";
+    return { ...f, uri, orig, mig, local, kind };
+  }));
+}
+
+function describe(p) {
+  return {
+    ready: p.status === "removed" ? "will be deleted" : p.status === "added" ? "new file" : "unchanged since the analysis: safe to replace",
+    conflict: p.status === "removed" ? "you changed it: deleting it loses your edits" : "your copy differs from the analysed version: replacing it loses those edits",
+  }[p.kind];
+}
+
+// One WorkspaceEdit for everything, then save exactly the files we touched.
+async function writeFiles(picks) {
   const edit = new vscode.WorkspaceEdit();
-  edit.replace(uri, new vscode.Range(0, 0, doc.lineCount, 0), text);
-  await vscode.workspace.applyEdit(edit);
+  for (const p of picks) {
+    if (p.status === "removed") edit.deleteFile(p.uri, { ignoreIfNotExists: true });
+    else if (p.local === null) edit.createFile(p.uri, { overwrite: false, ignoreIfExists: false, contents: Buffer.from(p.mig, "utf8") });
+    else {
+      const doc = await vscode.workspace.openTextDocument(p.uri);
+      // inserted text is normalised to the document's line endings by VS Code
+      edit.replace(p.uri, new vscode.Range(0, 0, doc.lineCount, 0), p.mig);
+    }
+  }
+  if (!(await vscode.workspace.applyEdit(edit))) throw new Error("VS Code rejected the edit; nothing was changed");
+  const saved = [];
+  for (const p of picks) {
+    if (p.status === "removed" || p.local === null) { saved.push(p.path); continue; } // created/deleted on disk already
+    const doc = await vscode.workspace.openTextDocument(p.uri);
+    if (await doc.save()) saved.push(p.path);
+  }
+  return saved;
+}
+
+async function applyFile(uri, rel) {
+  const root = await guardWorkspace();
+  if (!root) return;
+  rel = rel || vscode.workspace.asRelativePath(uri, false).replace(/\\/g, "/");
+  const [p] = await planFiles(root, rel);
+  if (!p) {
+    vscode.window.showInformationMessage(`DepExit: the migration does not change ${rel}.`);
+    return;
+  }
+  if (p.kind === "already") {
+    vscode.window.showInformationMessage(`DepExit: ${rel} already has the migrated version.`);
+    return;
+  }
+  if (p.kind === "missing") throw new Error(`${rel} does not exist in this folder (was it moved or deleted?)`);
+  if (p.status !== "removed") {
+    const migrated = await vscode.workspace.openTextDocument({ content: p.mig, language: (await vscode.workspace.openTextDocument(uri)).languageId });
+    await vscode.commands.executeCommand("vscode.diff", uri, migrated.uri, `${rel} ↔ DepExit migrated`);
+  }
+  if (!(await confirmVerification(1))) return;
+  const ok = await vscode.window.showWarningMessage(
+    p.kind === "conflict"
+      ? `${rel} has changed since DepExit analysed it. Replacing it with the migrated version DISCARDS your changes to this file. Continue?`
+      : `Apply DepExit's migrated version of ${rel}? The file is saved; undo with git (git checkout -- ${rel}).`,
+    { modal: true }, p.kind === "conflict" ? "Discard My Changes and Apply" : "Apply");
+  if (!ok) return;
+  await writeFiles([p]);
+  vscode.window.showInformationMessage(`DepExit: applied and saved ${rel}. Run your tests to confirm.`);
 }
 
 async function applyAll() {
-  if (!state.id) throw new Error("load an analysis first (DepExit: Load Analysis by ID)");
-  const root = workspaceRoot();
-  if (!root) throw new Error("open the cloned repository as a workspace folder");
-  const listing = await api(`/api/analyses/${state.id}/files`);
-  const changed = listing.files.filter((f) => f.status === "modified" || f.status === "added");
-  if (!changed.length) {
-    vscode.window.showInformationMessage("DepExit: nothing to migrate.");
+  const root = await guardWorkspace();
+  if (!root) return;
+  const plan = await planFiles(root);
+  const already = plan.filter((p) => p.kind === "already");
+  const missing = plan.filter((p) => p.kind === "missing");
+  const todo = plan.filter((p) => p.kind === "ready" || p.kind === "conflict");
+  for (const p of missing) output.appendLine(`skip ${p.path}: not found in this folder`);
+  if (!todo.length) {
+    vscode.window.showInformationMessage(plan.length && already.length === plan.length
+      ? `DepExit: all ${plan.length} migrated file(s) are already applied.`
+      : missing.length ? `DepExit: nothing to apply; ${missing.length} file(s) are missing from this folder (see the DepExit output).`
+        : "DepExit: nothing to migrate.");
     return;
   }
+  const conflicts = todo.filter((p) => p.kind === "conflict").length;
   const picks = await vscode.window.showQuickPick(
-    changed.map((f) => ({ label: f.path, description: f.status, picked: true })),
-    { canPickMany: true, title: `DepExit: ${changed.length} file(s) changed by the migration. Untick any to skip.` });
+    todo.map((p) => ({
+      label: (p.kind === "conflict" ? "$(warning) " : "") + p.path,
+      description: p.status,
+      detail: describe(p),
+      picked: p.kind === "ready", // never overwrite local edits unless ticked on purpose
+      p,
+    })),
+    {
+      canPickMany: true,
+      title: `DepExit: apply the migration to ${todo.length} file(s)` +
+        (conflicts ? ` · ${conflicts} changed locally (unticked)` : "") +
+        (already.length ? ` · ${already.length} already applied` : "") + (missing.length ? ` · ${missing.length} missing` : ""),
+    });
   if (!picks || !picks.length) return;
+  if (!(await confirmVerification(picks.length))) return;
+  const overwrite = picks.filter((x) => x.p.kind === "conflict").length;
   const ok = await vscode.window.showWarningMessage(
-    `Apply DepExit's Docker-verified migration to ${picks.length} file(s)? Changes stay unsaved so you can undo.`,
+    `Apply DepExit's migration to ${picks.length} file(s) and save them?` +
+    (overwrite ? ` ${overwrite} of them have local changes that will be DISCARDED.` : "") +
+    " Undo with git (git checkout -- . / git clean for new files).",
     { modal: true }, "Apply All");
   if (ok !== "Apply All") return;
-
-  const edit = new vscode.WorkspaceEdit();
-  let applied = 0;
-  for (const p of picks) {
-    const uri = vscode.Uri.joinPath(root, p.label);
-    const text = await api(`/api/analyses/${state.id}/migrated/${p.label}`, true);
-    if (p.description === "added") {
-      edit.createFile(uri, { overwrite: true, contents: Buffer.from(text, "utf8") });
-    } else {
-      const doc = await vscode.workspace.openTextDocument(uri);
-      if (doc.getText() === text) continue;
-      edit.replace(uri, new vscode.Range(0, 0, doc.lineCount, 0), text);
-    }
-    applied++;
-  }
-  await vscode.workspace.applyEdit(edit);
-  vscode.window.showInformationMessage(`DepExit: applied migration to ${applied} file(s). Review, run your tests, then save.`);
+  const saved = await writeFiles(picks.map((x) => x.p));
+  output.appendLine(`Applied migration ${state.id} to: ${saved.join(", ")}`);
+  const next = await vscode.window.showInformationMessage(
+    `DepExit: applied and saved ${saved.length} file(s)` + (missing.length ? ` (${missing.length} missing, skipped)` : "") +
+    ". Install the new dependencies and run your tests.", "Show Changes");
+  if (next === "Show Changes") vscode.commands.executeCommand("workbench.view.scm");
 }
 
 // ---- Sign in with GitHub ----

@@ -2,8 +2,9 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Card, FeatureCard, Button, CodeChip, NoticeBanner } from "@/components/ui/Base";
+import { Card, FeatureCard, Button, NoticeBanner } from "@/components/ui/Base";
 import { getHealth, listAnalyses, createAnalysis } from "@/lib/api";
+import { RecentAnalyses } from "@/components/RecentAnalyses";
 import type { Health, AnalysesListItem } from "@/lib/types";
 import {
   ArrowRight,
@@ -302,65 +303,11 @@ export default function HomePage() {
             Recent Analyses
           </h2>
           <span className="text-xs text-[#5A5870] font-semibold">
-            Click to inspect timeline & capsule
+            One card per repository · earlier runs fold away
           </span>
         </div>
 
-        <div className="space-y-3">
-          {recentAnalyses.length === 0 ? (
-            <div className="p-8 text-center text-sm font-semibold text-[#5A5870] bg-white rounded-2xl border-2 border-dashed border-[#17151F]/20">
-              No previous analyses found.
-            </div>
-          ) : (
-            recentAnalyses.map((item) => {
-              const statusColor =
-                item.status === "completed"
-                  ? "bg-[#B9E4A1] text-[#17151F]"
-                  : item.status === "completed_with_errors"
-                  ? "bg-[#F9D56E] text-[#17151F]"
-                  : item.status === "failed"
-                  ? "bg-[#FDECEC] text-[#D64545] border-[#D64545]"
-                  : "bg-white text-[#17151F]";
-
-              return (
-                <div
-                  key={item.id}
-                  onClick={() => router.push(`/analyses/${item.id}`)}
-                  className="bg-white border-[3px] border-[#17151F] rounded-2xl p-4 shadow-[4px_4px_0_0_#17151F] hover:-translate-x-[2px] hover:-translate-y-[2px] hover:shadow-[6px_6px_0_0_#17151F] transition cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-[#F5F1E8] border-2 border-[#17151F] flex items-center justify-center font-bold text-xs shrink-0">
-                      📦
-                    </div>
-                    <div>
-                      <h4 className="font-mono text-sm font-bold text-[#17151F] flex items-center gap-2">
-                        <span>{item.repo_url}</span>
-                        <CodeChip>{item.id}</CodeChip>
-                      </h4>
-                      <p className="text-xs text-[#5A5870] font-medium mt-0.5">
-                        Initiated {new Date(item.created_at).toLocaleString()}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-3 self-end sm:self-center">
-                    {item.summary && (
-                      <span className="text-xs font-semibold text-[#17151F] bg-[#F5F1E8] px-2.5 py-1 rounded-full border border-[#17151F]/20">
-                        {item.summary.at_risk} of {item.summary.dependencies_total} at risk
-                      </span>
-                    )}
-                    <span
-                      className={`text-xs font-bold px-3 py-1 rounded-full border border-[#17151F]/30 uppercase tracking-wider ${statusColor}`}
-                    >
-                      {item.status.replace("_", " ")}
-                    </span>
-                    <ArrowRight className="w-4 h-4 text-[#5A5870]" />
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
+        <RecentAnalyses items={recentAnalyses} />
       </section>
     </main>
   );
