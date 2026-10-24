@@ -11,3 +11,7 @@ out/
 *.exe
 backend/bin/
 *.vsix
+# local run output and scratch files
+/*.log
+scratch/
+.claude/
